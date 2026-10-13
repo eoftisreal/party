@@ -28,9 +28,14 @@ bool ClockEstimator::sample(int64_t t0, int64_t t1, int64_t t2, int64_t t3) {
     const auto rtt = (t3 - t0) - (t2 - t1);
     if (rtt < 0 || rtt > 5000000) return false;
     std::lock_guard lock(mutex_);
-    if (!ready_ || rtt <= rtt_) { offset_ = ((t1 - t0) + (t2 - t3)) / 2; rtt_ = rtt; ready_ = true; }
+    if (!ready_ || rtt <= rtt_ || t3-lastBest_>30000000) {
+        const auto next=((t1-t0)+(t2-t3))/2;
+        offset_=ready_?offset_+std::clamp<int64_t>(next-offset_,-5000,5000):next;
+        rtt_=rtt;lastBest_=t3;ready_=true;
+    }
     return true;
 }
+void ClockEstimator::reset() {std::lock_guard lock(mutex_);offset_=rtt_=lastBest_=0;ready_=false;}
 int64_t ClockEstimator::localTime(int64_t hostUs) const { std::lock_guard lock(mutex_); return hostUs - offset_; }
 int64_t ClockEstimator::offsetUs() const { std::lock_guard lock(mutex_); return offset_; }
 int64_t ClockEstimator::rttUs() const { std::lock_guard lock(mutex_); return rtt_; }

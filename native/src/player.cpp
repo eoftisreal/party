@@ -183,7 +183,7 @@ struct Player::Impl {
                     const auto next = PlaybackState::parse(j);
                     if (haveState && next.epoch < state.epoch) continue;
                     if (!haveState || next.epoch != state.epoch) flush();
-                    state = next; haveState = true; owner.hostAnchorUs = next.hostNowUs;
+                    state = next; haveState = true; owner.hostAnchorUs = next.hostNowUs; owner.cutoffUs=next.cutoffUs;
                 }
             } catch (const std::exception&) { /* malformed control cannot alter playback */ }
         }
@@ -254,7 +254,7 @@ Json Player::ping() {
 }
 void Player::reset() {
     { std::lock_guard lock(impl_->mutex); impl_->incoming.clear(); impl_->controls.clear(); impl_->outstandingPings.clear(); impl_->incomingBytes = 0; }
-    impl_->flush(); impl_->haveState = false; hostAnchorUs = 0;
+    impl_->flush(); impl_->haveState = false; hostAnchorUs = 0; cutoffUs=0; clock.reset();
 }
 bool Player::tick() { return impl_->tick(); }
 bool Player::needsKeyframe() { return impl_->requestKeyframe.exchange(false); }

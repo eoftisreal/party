@@ -3,11 +3,13 @@
 #include "party/signaling.hpp"
 #include "party/transport.hpp"
 #include <csignal>
+#include <cmath>
 #include <iostream>
 #include <set>
 #include <thread>
 #ifdef _WIN32
 #include <conio.h>
+#include <windows.h>
 #else
 #include <poll.h>
 #include <unistd.h>
@@ -22,10 +24,15 @@ void interrupt(int) { quitting = true; }
 std::optional<std::string> command() {
 #ifdef _WIN32
     static std::string line;
-    while (_kbhit()) {
-        const char c = char(_getch());
-        if (c == '\r') { auto result = line; line.clear(); std::cout << '\n'; return result; }
-        if (c == '\b') { if (!line.empty()) line.pop_back(); } else if (c >= ' ') { line += c; std::cout << c << std::flush; }
+    const HANDLE handle=GetStdHandle(STD_INPUT_HANDLE);
+    const bool console=GetFileType(handle)==FILE_TYPE_CHAR;
+    while(true) {
+        char c=0;
+        if(console) {if(!_kbhit())break;c=char(_getch());}
+        else {DWORD available=0,read=0;if(!PeekNamedPipe(handle,nullptr,0,nullptr,&available,nullptr)||!available)break;
+            if(!ReadFile(handle,&c,1,&read,nullptr)||!read)break;}
+        if(c=='\r'||c=='\n'){if(line.empty())continue;auto result=line;line.clear();if(console)std::cout<<'\n';return result;}
+        if(c=='\b'){if(!line.empty())line.pop_back();}else if(c>=' '){line+=c;if(console)std::cout<<c<<std::flush;}
     }
 #else
     pollfd fd{STDIN_FILENO, POLLIN, 0};
@@ -36,6 +43,7 @@ std::optional<std::string> command() {
 }
 int main(int argc, char** argv) {
     using namespace party;
+    std::cout.setf(std::ios::unitbuf);
     try {
         if (argc < 2) throw std::invalid_argument("Usage: party host --file movie.mp4 [--room ID] | party viewer --room ID --invite CODE [--headless] [--preview]");
         const bool host = std::string(argv[1]) == "host";
@@ -67,7 +75,7 @@ int main(int argc, char** argv) {
         std::unique_ptr<Player> player;
         std::unique_ptr<MediaSource> source;
         std::string remoteUser, generation, authorizing, remoteSessionVersion;
-        std::set<std::string> seen;
+
         std::atomic<int64_t> lastRemoteKeyframe{0};
         ScopeExit cleanup{[&] {
             if (peer) peer->close();
@@ -103,17 +111,32 @@ int main(int argc, char** argv) {
         std::signal(SIGINT, interrupt); std::signal(SIGTERM, interrupt);
         std::cout << (host ? "Commands: play, pause, seek SECONDS, stop, stats, quit\n" : "Commands: stats, quit\n");
         int64_t peerStarted = 0, disconnectedSince = 0, lastState = 0, lastPing = 0, lastStats = 0;
-        bool wasConnected = false, resume = true;
+        bool wasConnected = false, resume = true, coordinationActive=true;
+        uint64_t sentEpoch=UINT64_MAX;
         while (!quitting) {
             for (const auto& event : signaling.events()) {
                 const auto kind = event.at("event").get<std::string>();
                 if (kind == "closed") { std::cerr << "Room unavailable: " << event.value("code", "closed") << '\n'; quitting = true; break; }
+                if(kind=="coordination-lost" || kind=="rejoined") {
+                    if(source) {resume=source->state().playing || resume;source->pause();}
+                    if(peer)peer->close();
+                    {std::lock_guard lock(peerMutex);peer.reset();}
+                    if(player){player->reset();if(host){const auto t=nowUs();player->clock.sample(t,t,t,t);}}
+                    authorizing.clear();remoteUser.clear();generation.clear();wasConnected=false;
+                    coordinationActive=kind=="rejoined";
+                }
+                if(kind=="coordination-restored") coordinationActive=true;
                 if (kind == "error") { std::cerr << "Signaling rejected: " << event.value("code", "error") << '\n'; authorizing.clear(); }
-                if (kind == "room" && host) {
+                if (kind == "room" && host && coordinationActive) {
                     const auto& members = event.at("participants");
                     bool online = false;
                     for (const auto& m : members) if (m.at("userId") != signaling.userId() && m.at("online") == true) {
                         online = true;
+                        const auto connection=event.value("connection",Json());
+                        if(peer && connection.is_object() && connection.value("generation","")==generation && connection.value("state","")=="closed") {
+                            resume=source->state().playing || resume;source->pause();peer->close();
+                            {std::lock_guard lock(peerMutex);peer.reset();}wasConnected=false;
+                        }
                         const auto sessionVersion = m.value("sessionVersion", "");
                         if (peer && m.at("userId") == remoteUser && !remoteSessionVersion.empty() && remoteSessionVersion != sessionVersion) {
                             resume = source->state().playing; source->pause(); peer->close();
@@ -131,27 +154,29 @@ int main(int argc, char** argv) {
                         remoteUser.clear(); authorizing.clear(); wasConnected = false;
                     }
                 }
-                if (kind == "authorized" && host) {
+                if (kind == "authorized" && host && coordinationActive) {
                     if (peer) peer->close();
                     remoteUser = event.at("viewerId"); generation = event.at("generation");
                     const auto next = createPeer(); { std::lock_guard lock(peerMutex); peer = next; }
-                    authorizing.clear(); next->offer(); peerStarted = nowUs(); wasConnected = false; seen.clear();
+                    authorizing.clear(); next->offer(); peerStarted = nowUs(); wasConnected = false; sentEpoch=UINT64_MAX;
                 }
-                if (kind == "signal") {
-                    if (seen.contains(event.at("messageId").get<std::string>())) continue;
-                    if (!host && event.at("type") == "offer" && event.at("generation") != generation) {
-                        if (peer) peer->close(); player->reset();
-                        remoteUser = event.at("from"); generation = event.at("generation");
-                        auto next = createPeer(); { std::lock_guard lock(peerMutex); peer = next; }
-                        peerStarted = nowUs(); seen.clear();
-                    }
-                    if (peer && event.at("generation") == generation && event.at("from") == remoteUser) {
-                        peer->signal(event); seen.insert(event.at("messageId").get<std::string>());
-                        if (seen.size() > 256) seen.erase(seen.begin());
-                    }
+                if(kind=="signal") {
+                    const auto id=event.at("messageId").get<std::string>();
+                    if(!signaling.current(event)){signaling.processed(id,true);continue;}
+                    bool applied=false;
+                    try {
+                        if(!host && event.at("type")=="offer" && event.at("generation")!=generation) {
+                            if(peer)peer->close();player->reset();
+                            remoteUser=event.at("from");generation=event.at("generation");
+                            auto next=createPeer();{std::lock_guard lock(peerMutex);peer=next;}peerStarted=nowUs();
+                        }
+                        if(peer && event.at("generation")==generation && event.at("from")==remoteUser) applied=peer->signal(event);
+                    } catch(const std::exception&) {std::cerr<<"Signal application failed; retained for retry\n";}
+                    signaling.processed(id,applied);
                 }
             }
-            if (peer) {
+            if (peer && coordinationActive) {
+                if(player)peer->receiveCutoffUs=player->cutoffUs.load();
                 peer->pump();
                 for (const auto& message : peer->takeSignals()) signaling.send(remoteUser, generation, message);
                 const bool connected = peer->connected();
@@ -167,7 +192,9 @@ int main(int argc, char** argv) {
                 if (host && connected) {
                     if (peer->forceKeyframe.exchange(false)) source->keyframe();
                     source->bitrate(peer->targetBitrate);
-                    if (nowUs()-lastState > 100000) { const auto state = source->state().json(); peer->control(state); if (player) player->control(state); lastState = nowUs(); }
+                    if (nowUs()-lastState > 100000) { const auto playback=source->state();
+                        if(sentEpoch!=playback.epoch){peer->discardQueuedMedia();sentEpoch=playback.epoch;}
+                        const auto state = playback.json(); peer->control(state); if (player) player->control(state); lastState = nowUs(); }
                 }
                 if (!host) {
                     peer->hostAnchorUs = player->hostAnchorUs.load();

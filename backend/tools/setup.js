@@ -7,9 +7,10 @@ const db=new Databases(new Client().setEndpoint(endpoint).setProject(project).se
 const schema={
   rooms:{hostId:36,title:80,inviteHash:64,status:12,expiresAt:'datetime',revision:'integer'},
   members:{roomId:32,userId:36,joinedAt:'datetime',lastSeenAt:'datetime',sessionId:32,rateWindow:'integer',rateCount:'integer'},
-  peers:{roomId:32,hostId:36,viewerId:36,hostSession:32,viewerSession:32,generation:32,state:16,expiresAt:'datetime'},
+  peers:{requestId:{size:32,xdefault:''},roomId:32,hostId:36,viewerId:36,hostSession:32,viewerSession:32,generation:32,state:16,expiresAt:'datetime'},
   signals:{roomId:32,from:36,to:36,generation:32,type:16,payload:65536,toSession:32,expiresAt:'datetime'},
-  notifications:{roomId:32,userId:36,expiresAt:'datetime'}
+  limits:{revision:'integer',createWindow:'integer',createCount:'integer',joinWindow:'integer',joinCount:'integer'},
+  notifications:{fingerprint:{size:64,xdefault:''},roomId:32,userId:36,expiresAt:'datetime'}
 };
 try{await db.create({databaseId,name:'Party prototype'});}catch(e){if(e.code!==409)throw e;}
 for(const [name,attributes]of Object.entries(schema)){
@@ -19,8 +20,9 @@ for(const [name,attributes]of Object.entries(schema)){
   if(!collection.documentSecurity||collection.$permissions.length)throw Error(`Unsafe permissions on ${name}; remove collection permissions and enable document security`);
   for(const [key,type]of Object.entries(attributes)){
     try{
-      const params={databaseId,collectionId,key,required:true};
-      if(type==='datetime')await db.createDatetimeAttribute(params);
+      const params={databaseId,collectionId,key,required:typeof type!=='object'};
+      if(typeof type==='object') {await db.createStringAttribute({...params,...type});}
+      else if(type==='datetime')await db.createDatetimeAttribute(params);
       else if(type==='integer')await db.createIntegerAttribute({...params,min:0,max:2147483647});
       else await db.createStringAttribute({...params,size:type});
     }catch(e){if(e.code!==409)throw e;}
@@ -33,7 +35,7 @@ for(const [name,attributes]of Object.entries(schema)){
     }
     if(!available)throw Error(`Attribute still pending: ${name}.${key}; retry setup`);
   }
-  if(name!=='rooms'){
+  if(name!=='rooms' && name!=='limits'){
     try{await db.createIndex({databaseId,collectionId,key:'roomId',type:'key',attributes:['roomId']});}catch(e){if(e.code!==409)throw e;}
   }
   console.log(`Configured ${collectionId}`);

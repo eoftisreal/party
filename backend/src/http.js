@@ -27,7 +27,7 @@ export function makeHandler({ service, signaling, authenticate, logError = () =>
       if (!user) throw new ApiError(401, 'INVALID_TOKEN', 'Invalid JWT');
       if (path === '/v1/rooms' && method === 'POST') return res.json(await service.create(user, body(req)), 201);
       const [, id, action] = route.exec(path) || [], session = header(req, 'x-party-session');
-      if (id && method === 'GET' && !action) return res.json(await service.read(id, user), 200);
+      if (id && method === 'GET' && !action) return res.json(await service.read(id, user, session), 200);
       if (id && method === 'GET' && action === 'signals') return res.json(await signaling.inbox(id, user, session), 200);
       if (id && method === 'POST') {
         const input = body(req);

@@ -46,11 +46,25 @@ export function makeRoomsService(store, { now = () => Date.now(), random = rando
     for (const p of await s.listPeers(id)) if (p.hostId === user || p.viewerId === user) await s.updatePeer(p.$id, { state: 'closed' });
     for (const m of await s.listSignals(id)) if (m.from === user || m.to === user) await s.deleteSignal(m.$id);
   }
+  async function limit(user, kind) {
+    await store.atomic(async s => {
+      const id=digest('limit:'+user).slice(0,32);
+      const original=await s.getLimit(id);
+      if(!original) await s.createLimit(id,{revision:0,createWindow:0,createCount:0,joinWindow:0,joinCount:0});
+      else await s.updateLimit(id,{revision:original.revision+1});
+      const current=await s.getLimit(id);
+      const window=Math.floor(now()/(kind==='create'?3600000:60000));
+      const count=current[kind+'Window']===window?current[kind+'Count']:0;
+      if(count >= (kind==='create'?4:30)) fail(429,'RATE_LIMIT','Too many room requests');
+      await s.updateLimit(id,{[kind+'Window']:window,[kind+'Count']:count+1});
+    });
+  }
   return {
     authorize, active, touch, token, timestamp, now,
     async create(user, input = {}) {
       const title = input.title ?? 'Watch party';
       if (typeof title !== 'string' || !title.trim() || title.trim().length > 80) fail(400, 'INVALID_TITLE', 'Title must be 1 to 80 characters');
+      await limit(user,'create');
       const id = token(), inviteCode = random(24).toString('base64url'), sessionId = token();
       return store.atomic(async s => {
         const r = await s.createRoom(id, { hostId: user, title: title.trim(), inviteHash: digest(inviteCode), status: 'open', revision: 0,
@@ -61,6 +75,7 @@ export function makeRoomsService(store, { now = () => Date.now(), random = rando
       });
     },
     async join(id, user, invite) {
+      await limit(user,'join'); // Failed invite attempts also consume the committed budget.
       return store.atomic(async s => {
         const r = await lockRoom(s, id); active(r);
         const mid = memberId(id, user), existing = await s.getMember(mid);
@@ -82,9 +97,16 @@ export function makeRoomsService(store, { now = () => Date.now(), random = rando
         return safe(r, await s.listMembers(id), user, sessionId);
       });
     },
-    async read(id, user) {
-      const { room } = await authorize(store, id, user, null, false);
-      return safe(room, await store.listMembers(id), user);
+    async read(id, user, session) {
+      return store.atomic(async s => {
+        const {room}=await authorize(s,id,user,session,Boolean(session));
+        const members=await s.listMembers(id);
+        const peers=await s.listPeers(id);
+        const p=peers.find(p=>members.some(m=>m.userId===p.hostId && m.sessionId===p.hostSession) &&
+          members.some(m=>m.userId===p.viewerId && m.sessionId===p.viewerSession));
+        const connection=p?{generation:p.generation,viewerId:p.viewerId,state:members.every(m=>Date.parse(m.lastSeenAt)+120000>now())?p.state:'closed'}:null;
+        return {...safe(room,members,user),connection};
+      });
     },
     async heartbeat(id, user, session) {
       return store.atomic(async s => {

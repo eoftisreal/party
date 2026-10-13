@@ -2,8 +2,11 @@ name: Prototype verification
 on:
   pull_request:
   push:
-    branches: [main, feat/webrtc-streaming-prototype]
+    branches: [main]
   workflow_dispatch:
+concurrency:
+  group: prototype-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   backend:
     runs-on: ubuntu-latest
@@ -28,15 +31,39 @@ jobs:
       - run: python3 tools/generate_media.py /tmp/party-test.mp4
       - run: python3 tools/run_loopback.py build/party_loopback /tmp/party-test.mp4
       - run: python3 tools/run_loopback.py build/party_loopback /tmp/party-test.mp4 --impair
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm ci
+        working-directory: backend
+      - run: python3 tools/two_process.py build/party /tmp/party-test.mp4 --report two-process-linux.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: linux-process-report
+          path: two-process-linux.json
   windows:
     runs-on: windows-2022
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/cache@v4
+        with:
+          path: C:/Users/runneradmin/AppData/Local/vcpkg/archives
+          key: vcpkg-windows-x64-${{ hashFiles('vcpkg.json') }}
       - name: Configure pinned vcpkg dependencies
         shell: pwsh
         run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows
       - run: cmake --build build --config Release --parallel 4
+      - name: Runtime DLL and test-tool paths
+        shell: pwsh
+        run: |
+          "$PWD/build/vcpkg_installed/x64-windows/bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+          "$PWD/build/vcpkg_installed/x64-windows/tools/ffmpeg" | Out-File -FilePath $env:GITHUB_PATH -Append
+          "C:/Program Files/Git/usr/bin" | Out-File -FilePath $env:GITHUB_PATH -Append
       - run: ctest --test-dir build -C Release --output-on-failure
       - name: Real local streaming with software encoding
         shell: pwsh
@@ -47,3 +74,14 @@ jobs:
           python tools/run_loopback.py build/Release/party_loopback.exe "$env:TEMP/party-test.mp4"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python tools/run_loopback.py build/Release/party_loopback.exe "$env:TEMP/party-test.mp4" --impair
+
+      - run: npm ci
+        working-directory: backend
+      - name: Separate host and viewer with TLS signaling and response loss
+        shell: pwsh
+        run: python tools/two_process.py build/Release/party.exe "$env:TEMP/party-test.mp4" --report two-process-windows.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-process-report
+          path: two-process-windows.json

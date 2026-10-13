@@ -1,7 +1,7 @@
 import {makeRoomsService} from '../src/rooms.js';
 import {makeSignalingService} from '../src/signaling.js';
 export function fixture() {
-  const tables = Object.fromEntries(['Room','Member','Peer','Signal','Notification'].map(n => [n,new Map()]));
+  const tables = Object.fromEntries(['Room','Member','Peer','Signal','Notification','Limit'].map(n => [n,new Map()]));
   let time = Date.parse('2026-10-13T12:00:00Z'), serial = Promise.resolve();
   function methods(t) {
     const store = {};
@@ -22,6 +22,7 @@ export function fixture() {
     store.listSignals = async id => [...t.Signal.values()].filter(x=>x.roomId===id).map(x=>structuredClone(x));
     store.listRooms = async () => [...t.Room.values()].map(x=>structuredClone(x));
     store.listNotifications = async () => [...t.Notification.values()].map(x=>structuredClone(x));
+    store.getReceipt = store.getNotification;
     store.notify = (id,data) => store.createNotification(id,data);
     return store;
   }

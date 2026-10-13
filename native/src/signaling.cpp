@@ -28,6 +28,7 @@ Json http(const std::string& url, const std::string& method, const Json& data, c
     curl_easy_setopt(curl.get(), CURLOPT_CONNECTTIMEOUT_MS, 3000L);
     curl_easy_setopt(curl.get(), CURLOPT_TIMEOUT_MS, 10000L);
     curl_easy_setopt(curl.get(), CURLOPT_NOSIGNAL, 1L);
+    const auto ca=env("PARTY_CA_BUNDLE"); if(!ca.empty()) curl_easy_setopt(curl.get(),CURLOPT_CAINFO,ca.c_str());
     // Deliberately no redirects and no TLS-verification override: JWTs stay at configured origin.
     curl_easy_setopt(curl.get(), CURLOPT_WRITEFUNCTION, writeBody);
     curl_easy_setopt(curl.get(), CURLOPT_WRITEDATA, &response);
@@ -66,14 +67,23 @@ std::string AppwriteApi::jwt() {
     return jwt_;
 }
 Json AppwriteApi::request(const std::string& method, const std::string& path, const Json& data) {
-    auto result = http(functionUrl_ + path, method, data, {"Authorization: Bearer " + jwt(), "X-Party-Session: " + sessionId});
+    auto call = [&]{ return http(functionUrl_ + path, method, data, {"Authorization: Bearer " + jwt(), "X-Party-Session: " + sessionId}); };
+    Json result;
+    try { result = call(); } catch(const HttpError& e) {
+        if(e.status!=401 || sessionSecret_.empty()) throw;
+        jwtExpiryUs_=0; result=call(); // Renew once; a revoked user session still fails closed.
+    }
     if (result.contains("sessionId")) sessionId = result.at("sessionId").get<std::string>();
     if (result.contains("roomId")) roomId = result.at("roomId").get<std::string>();
     return result;
 }
-Signaling::Signaling(std::unique_ptr<AppwriteApi> api, Json room, bool host) : api_(std::move(api)), room_(std::move(room)), host_(host) {}
+Signaling::Signaling(Request request, Json room, bool host, SignalingOptions options)
+ : request_(std::move(request)), options_(options), room_(std::move(room)), host_(host) {}
+Signaling::Signaling(std::unique_ptr<AppwriteApi> api, Json room, bool host) : api_(std::move(api)), room_(std::move(room)), host_(host) {
+    request_=[this](const auto& method,const auto& path,const auto& data){return api_->request(method,path,data);};
+}
 Signaling::~Signaling() { stop(); }
-void Signaling::start() { worker_ = std::jthread([this](std::stop_token token) { run(token); }); }
+void Signaling::start() { if(worker_.joinable()) throw std::logic_error("Signaling already started"); worker_ = std::jthread([this](std::stop_token token) { run(token); }); }
 void Signaling::send(const std::string& to, const std::string& generation, const Json& message) {
     Json input = message; input["to"] = to; input["generation"] = generation; input["messageId"] = randomId();
     std::lock_guard lock(mutex_);
@@ -82,10 +92,18 @@ void Signaling::send(const std::string& to, const std::string& generation, const
 }
 void Signaling::authorize(const std::string& viewer, bool restart) {
     if (!host_) throw std::logic_error("Viewer cannot authorize stream");
-    std::lock_guard lock(mutex_); commands_.push_back({{"action", "peers"}, {"input", {{"viewerId", viewer}, {"restart", restart}}}});
+    std::lock_guard lock(mutex_);
+    if(commands_.size()>=128) throw std::runtime_error("Signaling queue overflow");
+    commands_.push_back({{"action", "peers"}, {"input", {{"viewerId", viewer}, {"restart", restart}, {"requestId", randomId()}}}});
 }
-std::vector<Json> Signaling::events() { std::lock_guard lock(mutex_); std::vector<Json> result(events_.begin(), events_.end()); events_.clear(); return result; }
+std::vector<Json> Signaling::events() {
+    std::lock_guard lock(mutex_); std::vector<Json> result(events_.begin(), events_.end()); events_.clear();
+    auto incoming=delivery_.ready(nowUs()); result.insert(result.end(),incoming.begin(),incoming.end()); return result;
+}
+void Signaling::processed(const std::string& id,bool success) { std::lock_guard lock(mutex_); delivery_.processed(id,success,nowUs()); }
+bool Signaling::current(const Json& message) { std::lock_guard lock(mutex_); return delivery_.current(message); }
 void Signaling::notifyRealtime() {
+    if(!api_) return;
     const auto endpoint = env("PARTY_APPWRITE_ENDPOINT"), project = env("PARTY_PROJECT_ID"), database = env("PARTY_DATABASE_ID");
     if (endpoint.empty() || project.empty() || database.empty()) return;
     requireHttps(endpoint);
@@ -112,52 +130,95 @@ void Signaling::notifyRealtime() {
     ws->open(url + "/realtime?project=" + project); realtime_ = ws;
 }
 void Signaling::run(std::stop_token stop) {
-    const auto base = "/v1/rooms/" + roomId();
-    int64_t lastPoll = 0, lastRoom = 0, lastHeartbeat = 0, lastRealtime = 0;
-    unsigned failures = 0;
-    int64_t leaseRefresh = nowUs();
-    auto event = [&](Json value) { std::lock_guard lock(mutex_); if (events_.size() >= 256) throw std::runtime_error("Signaling event overflow"); events_.push_back(std::move(value)); };
-    while (!stop.stop_requested()) {
+    const auto base="/v1/rooms/"+roomId();
+    auto request=[&](const std::string& method,const std::string& path,const Json& data=Json::object()){return request_(method,base+path,data);};
+    int64_t lastPoll=0,lastRoom=0,lastHeartbeat=0,lastRealtime=0,ackRetryAt=0,leaseRefresh=nowUs();
+    unsigned failures=0; bool suspended=false;
+    auto event=[&](Json value) {
+        std::lock_guard lock(mutex_);
+        const auto kind=value.at("event").get<std::string>();
+        if(kind=="closed") events_.clear();
+        if(kind=="room") std::erase_if(events_,[](const Json& e){return e.value("event","")=="room";});
+        if(events_.size()>=128) throw std::runtime_error("Signaling event queue full");
+        events_.push_back(std::move(value));
+    };
+    auto snapshot=[&](Json room) {
+        const auto connection=room.value("connection",Json());
+        std::string generation,sender; bool closed=true;
+        if(connection.is_object()) {
+            generation=connection.at("generation"); sender=host_?connection.at("viewerId").get<std::string>():hostId();
+            closed=connection.at("state")=="closed";
+        }
+        {std::lock_guard lock(mutex_); delivery_.authorize(generation,sender,closed);}
+        room["event"]="room"; event(room);
+    };
+    while(!stop.stop_requested()) {
         try {
-            const auto now = nowUs();
-            if ((!realtime_ || realtime_->isClosed()) && now - lastRealtime > 10000000) { lastRealtime = now; notifyRealtime(); }
-            if (now - lastHeartbeat >= 10000000) { api_->request("POST", base + "/heartbeat"); lastHeartbeat = now; leaseRefresh = nowUs(); }
-            std::optional<Json> command;
-            { std::lock_guard lock(mutex_); if (!commands_.empty()) command = commands_.front(); }
-            if (command) {
+            const auto now=nowUs();
+            // Realtime is optional. Its connection errors must never block the authoritative HTTP path.
+            if(api_ && (!realtime_ || realtime_->isClosed()) && now-lastRealtime>10000000) {
+                lastRealtime=now; try{notifyRealtime();}catch(const std::exception&){}
+            }
+            if(now-lastHeartbeat>=options_.heartbeatUs) {
+                request("POST","/heartbeat"); lastHeartbeat=now; leaseRefresh=nowUs();
+                if(suspended){event({{"event","coordination-restored"}});suspended=false;}
+            }
+            Json acks;
+            {std::lock_guard lock(mutex_);acks=delivery_.acknowledgements();}
+            if(!acks.empty() && now>=ackRetryAt) {
                 try {
-                    auto result = api_->request("POST", base + "/" + command->at("action").get<std::string>(), command->at("input"));
-                    if (command->at("action") == "peers") { result["event"] = "authorized"; event(result); }
-                    std::lock_guard lock(mutex_); commands_.pop_front();
-                } catch (const HttpError& e) {
-                    if (e.status >= 500 || e.status == 429 || e.code == "RETRY") throw;
-                    { std::lock_guard lock(mutex_); commands_.pop_front(); }
-                    event({{"event", "error"}, {"code", e.code}});
+                    request("POST","/ack",{{"messageIds",acks}});
+                    std::lock_guard lock(mutex_);delivery_.acknowledged(acks,nowUs());
+                } catch(const HttpError& e) {
+                    if(e.status==401 || e.status==403 || e.status==410) throw;
+                    ackRetryAt=now+options_.pollUs;
+                } catch(const std::exception&) {ackRetryAt=now+options_.pollUs;}
+            }
+            std::optional<Json> command;
+            {std::lock_guard lock(mutex_);if(!commands_.empty())command=commands_.front();}
+            if(command) {
+                try {
+                    auto result=request("POST","/"+command->at("action").get<std::string>(),command->at("input"));
+                    if(command->at("action")=="peers") {result["event"]="authorized";event(result);lastRoom=0;}
+                    std::lock_guard lock(mutex_);commands_.pop_front();
+                } catch(const HttpError& e) {
+                    if(e.status>=500 || e.status==429 || e.code=="RETRY" || e.status==401 || (e.status==403 && e.code!="REMOTE_PEER_EXPIRED") || e.status==410) throw;
+                    {std::lock_guard lock(mutex_);commands_.pop_front();}
+                    event({{"event","error"},{"code",e.code}});
                 }
             }
-            if (now - lastRoom >= 2000000) {
-                auto result = api_->request("GET", base); result["event"] = "room"; event(result); lastRoom = now;
+            if(now-lastRoom>=options_.pollUs) {snapshot(request("GET",""));lastRoom=now;}
+            if(now-lastPoll>=options_.pollUs || wake_->exchange(false)) {
+                const auto inbox=request("GET","/signals");
+                // Refresh authority before accepting a newly observed generation.
+                bool refresh=false;
+                {std::lock_guard lock(mutex_);for(const auto& m:inbox.at("messages")) if(!delivery_.current(m))refresh=true;}
+                if(refresh){snapshot(request("GET",""));lastRoom=now;}
+                {std::lock_guard lock(mutex_);delivery_.ingest(inbox.at("messages"),now);}
+                lastPoll=now;
             }
-            if (now - lastPoll >= 2000000 || wake_->exchange(false)) {
-                const auto inbox = api_->request("GET", base + "/signals");
-                Json ids = Json::array();
-                for (auto message : inbox.at("messages")) { ids.push_back(message.at("messageId")); message["event"] = "signal"; event(message); }
-                if (!ids.empty()) api_->request("POST", base + "/ack", {{"messageIds", ids}});
-                lastPoll = now;
-            }
-            failures = 0;
-        } catch (const HttpError& e) {
-            if (e.status == 401 || e.status == 403 || e.status == 404 || e.status == 410) {
-                event({{"event", "closed"}, {"code", e.code}}); break;
-            }
-            ++failures;
-        } catch (const std::exception&) { ++failures; }
-        if (nowUs() - leaseRefresh > 120000000) { event({{"event", "closed"}, {"code", "COORDINATION_UNAVAILABLE"}}); break; }
-        const auto delay = failures ? std::min(10000u, 250u * (1u << std::min(failures, 5u))) : 20u;
-        for (unsigned slept = 0; slept < delay && !stop.stop_requested(); slept += 20) std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            failures=0;
+        } catch(const HttpError& e) {
+            if(e.code=="PEER_EXPIRED") {
+                try {
+                    auto room=request("POST","/join");
+                    {std::lock_guard lock(mutex_);commands_.clear();delivery_.clear();}
+                    room["event"]="rejoined";event(room);suspended=false;leaseRefresh=nowUs();lastRoom=lastPoll=lastHeartbeat=0;
+                    continue;
+                } catch(const std::exception&) {++failures;}
+            } else if(e.status==401 || e.status==403 || e.status==404 || e.status==410) {
+                // In particular, STALE_SESSION is terminal: never fight another instance by rejoining.
+                event({{"event","closed"},{"code",e.code}});break;
+            } else ++failures;
+        } catch(const std::exception&) {++failures;}
+        const auto outage=nowUs()-leaseRefresh;
+        if(outage>options_.leaseUs*5/6 && !suspended) {event({{"event","coordination-lost"}});suspended=true;}
+        if(outage>options_.recoveryUs){event({{"event","closed"},{"code","COORDINATION_UNAVAILABLE"}});break;}
+        const auto delay=failures?std::min(10000u,250u*(1u<<std::min(failures,5u))):20u;
+        for(unsigned slept=0;slept<delay && !stop.stop_requested();slept+=20)std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
-    if (realtime_) { realtime_->resetCallbacks(); realtime_->close(); }
-    try { api_->request("POST", base + "/leave"); } catch (const std::exception&) { /* expired/closed rooms already revoke streaming */ }
+    if(realtime_){realtime_->resetCallbacks();realtime_->close();}
+    try{request("POST","/leave");}catch(const std::exception&){}
 }
 void Signaling::stop() { if (worker_.joinable()) { worker_.request_stop(); worker_.join(); } }
 }

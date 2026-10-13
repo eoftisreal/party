@@ -79,3 +79,26 @@ test('HTTP signaling rejects identity spoofing, missing membership session, and 
   assert.equal((await call({path:`/v1/rooms/${f.r.roomId}/signals`,headers:{authorization:'Bearer jwt','x-appwrite-user-id':'host'}})).status,403);
   assert.equal((await call({path:`/v1/rooms/${f.r.roomId}/signals`,method:'POST',bodyJson:{sdp:'x'.repeat(70000)}})).status,413);
 });
+test('post-ACK response loss retries are idempotent and conflicting IDs rejected',async()=>{
+  const f=await connected();
+  const input={messageId:'e'.repeat(32),to:'viewer',generation:f.p.generation,type:'offer',payload:{sdp:sdp('sendonly')}};
+  const first=await f.signaling.send(f.r.roomId,'host',f.r.sessionId,input);
+  await f.signaling.ack(f.r.roomId,'viewer',f.v.sessionId,{messageIds:[first.messageId]});
+  assert.deepEqual(await f.signaling.send(f.r.roomId,'host',f.r.sessionId,input),first);
+  assert.equal((await f.signaling.inbox(f.r.roomId,'viewer',f.v.sessionId)).messages.length,0);
+  await assert.rejects(f.signaling.send(f.r.roomId,'host',f.r.sessionId,{...input,payload:{sdp:sdp('sendonly')+'a=test:changed\r\n'}}),rejects('MESSAGE_REUSE'));
+});
+test('restart authorization response loss does not rotate the connection twice',async()=>{
+  const f=await connected(),input={viewerId:'viewer',restart:true,requestId:'f'.repeat(32)};
+  const first=await f.signaling.connect(f.r.roomId,'host',f.r.sessionId,input);
+  const retry=await f.signaling.connect(f.r.roomId,'host',f.r.sessionId,input);
+  assert.equal(first.generation,retry.generation);
+  assert.equal((await f.rooms.read(f.r.roomId,'host',f.r.sessionId)).connection.generation,first.generation);
+});
+test('persisted creation and failed invite budgets reject API abuse',async()=>{
+  const f=fixture();for(let i=0;i<4;++i)await f.rooms.create('host');
+  await assert.rejects(f.rooms.create('host'),rejects('RATE_LIMIT'));
+  f.advance(3600000);const r=await f.rooms.create('host');
+  for(let i=0;i<30;++i)await assert.rejects(f.rooms.join(r.roomId,'attacker','x'.repeat(32)),rejects('INVALID_INVITE'));
+  await assert.rejects(f.rooms.join(r.roomId,'attacker',r.inviteCode),rejects('RATE_LIMIT'));
+});

@@ -36,9 +36,10 @@ public:
     int64_t offsetUs() const;
     int64_t rttUs() const;
     bool ready() const;
+    void reset();
 private:
     mutable std::mutex mutex_;
-    int64_t offset_ = 0, rtt_ = 0;
+    int64_t offset_ = 0, rtt_ = 0, lastBest_ = 0;
     bool ready_ = false;
 };
 // Map a wrapping RTP timestamp to the nearest timestamp around an authenticated host-clock anchor.
