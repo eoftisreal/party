@@ -41,7 +41,7 @@ std::optional<std::string> command() {
     return {};
 }
 }
-int main(int argc, char** argv) {
+int runParty(int argc, char** argv) {
     using namespace party;
     std::cout.setf(std::ios::unitbuf);
     try {
@@ -233,3 +233,23 @@ int main(int argc, char** argv) {
         return 0;
     } catch (const std::exception& e) { std::cerr << "Party: " << e.what() << '\n'; return 1; }
 }
+
+#ifdef _WIN32
+int wmain(int argc, wchar_t** argv) {
+    // MSVC narrow argv uses the system code page; FFmpeg's Windows file I/O uses UTF-8.
+    std::vector<std::string> values;values.reserve(argc);
+    for(int i=0;i<argc;++i) {
+        const int size=WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,argv[i],-1,nullptr,0,nullptr,nullptr);
+        if(size<=0){std::cerr<<"Invalid command-line Unicode\n";return 1;}
+        std::string value(size,'\0');
+        if(!WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,argv[i],-1,value.data(),size,nullptr,nullptr))return 1;
+        value.resize(size-1);values.push_back(std::move(value));
+    }
+    std::vector<char*> arguments;arguments.reserve(argc+1);
+    for(auto& value:values)arguments.push_back(value.data());
+    arguments.push_back(nullptr);
+    return runParty(argc,arguments.data());
+}
+#else
+int main(int argc, char** argv) { return runParty(argc,argv); }
+#endif

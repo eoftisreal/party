@@ -22,6 +22,7 @@ import time
 parser=argparse.ArgumentParser()
 parser.add_argument('executable');parser.add_argument('movie');parser.add_argument('--report')
 parser.add_argument('--outage',action='store_true',help='Exercise a real 102-second HTTP outage and authorization lease recovery')
+parser.add_argument('--unicode',action='store_true',default=os.name=='nt',help='Exercise a Unicode host-side input filename')
 args=parser.parse_args()
 root=pathlib.Path(__file__).resolve().parent.parent
 exe=pathlib.Path(args.executable).resolve();movie=pathlib.Path(args.movie).resolve()
@@ -67,6 +68,9 @@ start=time.monotonic();report={'coordination':'local TLS fixture (not Appwrite C
 apps=[];server=None
 with tempfile.TemporaryDirectory(prefix='party-processes-') as temporary:
     work=pathlib.Path(temporary);key=work/'key.pem';cert=work/'cert.pem'
+    if args.unicode:
+        unicodeMovie=work/'host-source-电影.mp4';shutil.copyfile(movie,unicodeMovie);movie=unicodeMovie
+        report['unicodeHostPath']=True
     openssl=shutil.which('openssl') or str(pathlib.Path(os.environ.get('ProgramFiles','C:/Program Files'))/'Git/usr/bin/openssl.exe')
     subprocess.run([openssl,'req','-x509','-newkey','rsa:2048','-nodes','-keyout',str(key),'-out',str(cert),
         '-days','1','-subj','/CN=localhost','-addext','subjectAltName=IP:127.0.0.1,DNS:localhost'],check=True,capture_output=True)

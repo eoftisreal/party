@@ -20,6 +20,7 @@ Audited `main` at `10e898f8946fde57209275f36c182d11b11aab69`, the merge of PR #1
 | Callback targets could be released while callbacks were active | Peer close drains external frame/control callbacks; weak peer ownership is retained |
 | Outage recovery reused a connected generation; HTTPS latency could extend client lease enforcement | Request a fresh generation after suspension and enforce a conservative atomic deadline from the application thread; 102-second real HTTP-outage regression added |
 | Windows minimal FFmpeg lacked lavfi test input | Portable real raw-YUV/WAV generator fallback; production FFmpeg dependencies remain unchanged |
+| Windows narrow argv could corrupt non-ASCII movie filenames | UTF-16 entry point converts arguments to UTF-8; Windows process test uses a Unicode host-side fixture filename |
 | MSVC main CI failed with C3538 in rtp.cpp | Split mixed-type auto declarations, preserve MSVC C++20 build, initialize SDL explicitly for the custom main |
 | Setup ignored incompatible existing schema/readiness; room creation/invite attempts lacked account budgets | Validate schema/index readiness, additive optional attributes and private limits collection; persisted budgets and cleanup regression |
 
