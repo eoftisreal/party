@@ -8,6 +8,7 @@ Audited `main` at `10e898f8946fde57209275f36c182d11b11aab69`, the merge of PR #1
 | --- | --- |
 | Inbox messages deleted before application processing | Explicit processing result and post-apply ACK ledger; failed applications retry, lost ACK responses do not reapply SDP |
 | ACK deletion destroyed send idempotency | Keep a SHA-256 receipt through the 120-second delivery TTL; reject conflicting reuse; backend regression and dropped-response executable test |
+| Authorization event raced ahead of its authority snapshot, causing an endless restart loop after an outage | Refresh authority before publishing the event; event-consumption regression and real HTTP-outage scenario |
 | Restart authorization retried with a new generation | Stable requestId across retries; server returns the same generation; backend and worker regressions |
 | Delayed offers could replace current peers | Authoritative room connection snapshot and generation validation; stale inbox messages are deliberately discarded |
 | ICE could be lost before SDP | Defer ACK/application until remote SDP exists; bounded retry and per-peer candidate deduplication; actual RTC test deliberately presents ICE before SDP and repeats descriptions |
@@ -31,7 +32,7 @@ Native signaling queues are bounded: 128 outgoing commands/events, 256 ledger en
 
 Ubuntu 24.04 container, GCC 13, FFmpeg 6.1.1, pinned libdatachannel 0.24.1; generated 1920×1080/30fps movie with encoded audio. SDL dummy audio is used. No simulated media counters/frames substitute for decoding the real file.
 
-- 20 backend tests pass, including actual node-appwrite SDK request-shape tests, authorization, transaction rollback/capacity fixtures, post-ACK replay, restart retries, departures, persisted budgets, schema checks and retention cleanup. Fixtures do not prove deployed transaction semantics.
+- 22 backend tests pass, including actual node-appwrite SDK request-shape tests, authorization, transaction rollback/capacity fixtures, post-ACK replay, restart retries, departures, persisted budgets, schema checks and retention cleanup. Fixtures do not prove deployed transaction semantics.
 - All three C++ test executables pass: core/clock, RTP loss/reordering/cutoff/hostile payloads, and signaling worker delivery/retry/outage/lease/session/queue regressions.
 - Clean actual ICE/DTLS/SRTP streaming passes with pause/resume, forward/backward seeks, delayed output startup, SDP/ICE duplication, closed-track recovery, replacement peers and stop.
 - Controlled RTP packet-loss/reordering streaming passes; NACK recovery is exercised on actual encrypted media. This is a sender-handler injection, not external network shaping.

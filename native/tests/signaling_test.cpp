@@ -110,7 +110,10 @@ int main(){using namespace party;try{
         }
         if(path.ends_with("/signals"))return {{"messages",Json::array()}};return hostRoom;
     },hostRoom,true,{20000,20000,2000000,4000000});
-    retry.authorize("viewer",true);retry.start();until(retry,[](const Json& e){return e.at("event")=="authorized";});retry.stop();
+    retry.authorize("viewer",true);retry.start();until(retry,[&](const Json& e){
+        if(e.at("event")!="authorized")return false;
+        expect(retry.current({{"generation",e.at("generation")},{"from",e.at("viewerId")},{"type","answer"}}),"Authorization event preceded authoritative generation refresh");return true;
+    });retry.stop();
     expect(authorizations==2,"Authorization retry did not complete");
     Signaling bounded([](const auto&,const auto&,const auto&){return Json::object();},room,false);
     for(unsigned i=0;i<128;++i)bounded.send("host",id('a'),{{"type","candidate"}});

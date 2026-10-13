@@ -198,7 +198,11 @@ void Signaling::run(std::stop_token stop) {
             if(command) {
                 try {
                     auto result=request("POST","/"+command->at("action").get<std::string>(),command->at("input"));
-                    if(command->at("action")=="peers") {result["event"]="authorized";event(result);lastRoom=0;}
+                    if(command->at("action")=="peers") {
+                        // Publish only after authority is refreshed; the application can consume events immediately.
+                        snapshot(request("GET",""));lastRoom=now;
+                        result["event"]="authorized";event(result);
+                    }
                     std::lock_guard lock(mutex_);commands_.pop_front();
                 } catch(const HttpError& e) {
                     if(e.status>=500 || e.status==429 || e.code=="RETRY" || e.status==401 || (e.status==403 && e.code!="REMOTE_PEER_EXPIRED") || e.status==410) throw;
