@@ -5,7 +5,10 @@ import fs from 'node:fs';
 import {randomBytes} from 'node:crypto';
 import {fixture} from './fixture.js';
 import {makeHandler} from '../src/http.js';
-const f=fixture();let dropSignal=true,dropAck=true;
+const f=fixture();let wallLast=Date.now(),outageUntil=0;
+function tick(){const now=Date.now();f.advance(now-wallLast);wallLast=now;}
+setInterval(tick,1000).unref();
+let dropSignal=true,dropAck=true;
 const minted={host:0,viewer:0},validJwt=new Map();
 const handler=makeHandler({service:f.rooms,signaling:f.signaling,authenticate:async token=>{
   if(validJwt.has(token))return validJwt.get(token);
@@ -13,7 +16,10 @@ const handler=makeHandler({service:f.rooms,signaling:f.signaling,authenticate:as
 }});
 const counts={signals:0,acks:0,offers:0,answers:0,joins:0,closed:0,signalResponseDropped:0,ackResponseDropped:0,jwtRequests:0,expiredJwts:0};
 const server=https.createServer({key:fs.readFileSync(process.env.TEST_KEY),cert:fs.readFileSync(process.env.TEST_CERT)},async(req,res)=>{
-  const path=new URL(req.url,'https://localhost').pathname;
+  tick();const path=new URL(req.url,'https://localhost').pathname;
+  if(path==='/test-outage' && req.headers.authorization===`Bearer ${process.env.TEST_HOST_TOKEN}`){
+    outageUntil=Date.now()+102000;res.writeHead(200);res.end('{}');return;
+  }
   if(path==='/account/jwts' && req.method==='POST'){
     const secret=req.headers['x-appwrite-session'];
     const user=secret===process.env.TEST_HOST_TOKEN?'host':secret===process.env.TEST_VIEWER_TOKEN?'viewer':null;
@@ -24,6 +30,7 @@ const server=https.createServer({key:fs.readFileSync(process.env.TEST_KEY),cert:
     res.writeHead(201,{'Content-Type':'application/json'});res.end(JSON.stringify({jwt}));return;
   }
   if(path==='/test-metrics' && req.headers.authorization===`Bearer ${process.env.TEST_HOST_TOKEN}`){res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify(counts));return;}
+  if(Date.now()<outageUntil){res.writeHead(503,{'Content-Type':'application/json'});res.end(JSON.stringify({error:{code:'SERVICE_UNAVAILABLE'}}));return;}
   let text='';for await(const chunk of req){text+=chunk;if(Buffer.byteLength(text)>65536){res.writeHead(413);res.end('{}');return;}}
   let payload={};try{payload=text?JSON.parse(text):{};}catch{}
   if(path.endsWith('/signals') && req.method==='POST'){++counts.signals;if(payload.type==='offer')++counts.offers;if(payload.type==='answer')++counts.answers;}

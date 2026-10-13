@@ -111,10 +111,14 @@ int main(int argc, char** argv) {
         std::signal(SIGINT, interrupt); std::signal(SIGTERM, interrupt);
         std::cout << (host ? "Commands: play, pause, seek SECONDS, stop, stats, quit\n" : "Commands: stats, quit\n");
         int64_t peerStarted = 0, disconnectedSince = 0, lastState = 0, lastPing = 0, lastStats = 0;
-        bool wasConnected = false, wantsPlay = true, coordinationActive=true;
+        bool wasConnected = false, wantsPlay = true, coordinationActive=true, restartRequired=false;
         uint64_t sentEpoch=UINT64_MAX;
         while (!quitting) {
-            for (const auto& event : signaling.events()) {
+            auto updates=signaling.events();
+            // Lease enforcement must not wait for a blocked HTTPS call on the worker.
+            if(coordinationActive && !signaling.leaseHealthy())updates.insert(updates.begin(),Json{{"event","coordination-lost"}});
+            else if(!coordinationActive && signaling.leaseHealthy())updates.push_back({{"event","coordination-restored"}});
+            for (const auto& event : updates) {
                 const auto kind = event.at("event").get<std::string>();
                 if (kind == "closed") { std::cerr << "Room unavailable: " << event.value("code", "closed") << '\n'; quitting = true; break; }
                 if(kind=="coordination-lost" || kind=="rejoined") {
@@ -123,9 +127,9 @@ int main(int argc, char** argv) {
                     {std::lock_guard lock(peerMutex);peer.reset();}
                     if(player){player->reset();if(host){const auto t=nowUs();player->clock.sample(t,t,t,t);}}
                     authorizing.clear();remoteUser.clear();generation.clear();wasConnected=false;disconnectedSince=0;
-                    coordinationActive=kind=="rejoined";
+                    restartRequired=true;coordinationActive=kind=="rejoined" && signaling.leaseHealthy();
                 }
-                if(kind=="coordination-restored") coordinationActive=true;
+                if(kind=="coordination-restored") coordinationActive=signaling.leaseHealthy();
                 if (kind == "error") { std::cerr << "Signaling rejected: " << event.value("code", "error") << '\n'; authorizing.clear(); }
                 if (kind == "room" && host && coordinationActive) {
                     const auto& members = event.at("participants");
@@ -145,7 +149,7 @@ int main(int argc, char** argv) {
                         }
                         remoteSessionVersion = sessionVersion;
                         if (authorizing.empty() && (!peer || m.at("userId") != remoteUser)) {
-                            authorizing = m.at("userId").get<std::string>(); signaling.authorize(authorizing);
+                            authorizing = m.at("userId").get<std::string>(); signaling.authorize(authorizing,restartRequired);
                         }
                     }
                     if (!online && peer) {
@@ -159,7 +163,7 @@ int main(int argc, char** argv) {
                     if (peer) peer->close();
                     remoteUser = event.at("viewerId"); generation = event.at("generation");
                     const auto next = createPeer(); { std::lock_guard lock(peerMutex); peer = next; }
-                    authorizing.clear(); next->offer(); peerStarted = nowUs(); wasConnected = false; disconnectedSince=0; sentEpoch=UINT64_MAX;
+                    authorizing.clear();restartRequired=false; next->offer(); peerStarted = nowUs(); wasConnected = false; disconnectedSince=0; sentEpoch=UINT64_MAX;
                 }
                 if(kind=="signal") {
                     const auto id=event.at("messageId").get<std::string>();
@@ -218,7 +222,7 @@ int main(int argc, char** argv) {
                 } else if (*line == "stats") lastStats = 0;
             }
             if (nowUs()-lastStats > 5000000) {
-                Json stats; if (peer) stats["network"] = peer->stats(); if (source) stats["media"] = source->stats(); if (player) stats["player"] = player->stats();
+                Json stats; if (peer) {stats["network"] = peer->stats();stats["connectionGeneration"]=generation;} if (source) stats["media"] = source->stats(); if (player) stats["player"] = player->stats();
                 std::cout << stats.dump() << '\n'; lastStats = nowUs();
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(2));

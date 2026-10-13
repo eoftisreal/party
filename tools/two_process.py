@@ -21,6 +21,7 @@ import threading
 import time
 parser=argparse.ArgumentParser()
 parser.add_argument('executable');parser.add_argument('movie');parser.add_argument('--report')
+parser.add_argument('--outage',action='store_true',help='Exercise a real 102-second HTTP outage and authorization lease recovery')
 args=parser.parse_args()
 root=pathlib.Path(__file__).resolve().parent.parent
 exe=pathlib.Path(args.executable).resolve();movie=pathlib.Path(args.movie).resolve()
@@ -97,6 +98,16 @@ with tempfile.TemporaryDirectory(prefix='party-processes-') as temporary:
             previous=viewer.latest('player','epoch');host.command(f'seek {seconds}');viewer.command('stats')
             viewer.wait(lambda:viewer.latest('player','epoch')>previous)
             epochs.append(viewer.latest('player','epoch'))
+        if args.outage:
+            host.command('pause');viewer.wait(lambda:viewer.stats and not viewer.stats[-1]['player'].get('playing',True))
+            previous=viewer.stats[-1]['connectionGeneration'];outageStart=time.monotonic()
+            req=urllib.request.Request(f'https://127.0.0.1:{port}/test-outage',data=b'{}',method='POST',headers={'Authorization':'Bearer '+hostToken})
+            with urllib.request.urlopen(req,context=ssl.create_default_context(cafile=str(cert))) as response:response.read()
+            viewer.wait(lambda:viewer.stats and viewer.stats[-1].get('connectionGeneration',previous)!=previous and viewer.latest('network','connected',False),seconds=125)
+            assert not viewer.stats[-1]['player']['playing'],'Paused intent was lost during coordination recovery'
+            report['outage']={'httpFailureSeconds':102,'recoverySeconds':round(time.monotonic()-outageStart,3),'newGeneration':True,'pausedAfterRecovery':True}
+            before=viewer.latest('player','renderedVideoFrames');host.command('play')
+            viewer.wait(lambda:viewer.latest('player','renderedVideoFrames')>before+25)
         first=viewer.stats[-1];viewer.command('quit');viewer.process.wait(timeout=15)
         time.sleep(3);viewer=join()
         viewer.wait(lambda:viewer.latest('player','renderedVideoFrames')>25 and viewer.latest('player','decodedAudioPackets')>50)

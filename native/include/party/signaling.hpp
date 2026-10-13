@@ -38,6 +38,7 @@ public:
     void processed(const std::string& messageId, bool success);
     bool current(const Json& message);
     void stop();
+    bool leaseHealthy() const { return nowUs()<leaseDeadlineUs_.load(); }
     std::string roomId() const { return room_.at("roomId"); }
     std::string userId() const { return room_.at("yourUserId"); }
     std::string hostId() const { return room_.at("hostId"); }
@@ -48,6 +49,7 @@ private:
     Request request_;
     SignalingOptions options_;
     SignalDelivery delivery_;
+    std::atomic<int64_t> leaseDeadlineUs_{0};
     Json room_;
     bool host_;
     std::jthread worker_;

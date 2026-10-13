@@ -31,12 +31,14 @@ jobs:
       - run: python3 tools/generate_media.py /tmp/party-test.mp4
       - run: python3 tools/run_loopback.py build/party_loopback /tmp/party-test.mp4
       - run: python3 tools/run_loopback.py build/party_loopback /tmp/party-test.mp4 --impair
+      - run: python3 tools/generate_media.py /tmp/party-raw.mp4 --raw
+      - run: python3 tools/run_loopback.py build/party_loopback /tmp/party-raw.mp4
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
       - run: npm ci
         working-directory: backend
-      - run: python3 tools/two_process.py build/party /tmp/party-test.mp4 --report two-process-linux.json
+      - run: python3 tools/two_process.py build/party /tmp/party-test.mp4 --outage --report two-process-linux.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -92,7 +94,7 @@ jobs:
         working-directory: backend
       - name: Separate host and viewer with TLS signaling and response loss
         shell: pwsh
-        run: python tools/two_process.py build/Release/party.exe "$env:TEMP/party-test.mp4" --report two-process-windows.json
+        run: python tools/two_process.py build/Release/party.exe "$env:TEMP/party-test.mp4" --outage --report two-process-windows.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:

@@ -77,6 +77,16 @@ int main(){using namespace party;try{
     },room,false,{20000,20000,100000,3000000});
     outage.start();until(outage,[](const Json& e){return e.at("event")=="coordination-lost";});offline=false;
     until(outage,[](const Json& e){return e.at("event")=="coordination-restored";});outage.stop();
+    std::atomic<bool> entered{false},release{false};unsigned blockedHearts=0;
+    Signaling blocked([&](const std::string&,const std::string& path,const Json&)->Json{
+        if(path.ends_with("/heartbeat") && ++blockedHearts==1){entered=true;while(!release)std::this_thread::sleep_for(std::chrono::milliseconds(2));}
+        if(path.ends_with("/signals"))return {{"messages",Json::array()}};return room;
+    },room,false,{20000,20000,200000,4000000});
+    blocked.start();while(!entered)std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    std::this_thread::sleep_for(std::chrono::milliseconds(180));
+    const bool staleDuringRequest=!blocked.leaseHealthy();release=true;
+    until(blocked,[](const Json& e){return e.at("event")=="coordination-restored";});blocked.stop();
+    expect(staleDuringRequest,"Blocked HTTPS worker extended the media authorization lease");
     Json hostRoom=room;hostRoom["yourUserId"]="host";std::string requestId;unsigned authorizations=0;
     Signaling retry([&](const std::string&,const std::string& path,const Json& input)->Json{
         if(path.ends_with("/peers")){

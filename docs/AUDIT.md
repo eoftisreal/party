@@ -18,6 +18,8 @@ Audited `main` at `10e898f8946fde57209275f36c182d11b11aab69`, the merge of PR #1
 | Pacer and partial RTP access units survived seeks | Clear unsent media and old receive epochs; reject stale packets before loss accounting; separate intentional-discard counter; repeated backward/forward seek tests |
 | Missing clock anchors inflated jitter; best RTT stayed pinned indefinitely | Exclude unanchored transit, renew best-RTT window, bound clock adjustment, reset clocks on replacement; regressions |
 | Callback targets could be released while callbacks were active | Peer close drains external frame/control callbacks; weak peer ownership is retained |
+| Outage recovery reused a connected generation; HTTPS latency could extend client lease enforcement | Request a fresh generation after suspension and enforce a conservative atomic deadline from the application thread; 102-second real HTTP-outage regression added |
+| Windows minimal FFmpeg lacked lavfi test input | Portable real raw-YUV/WAV generator fallback; production FFmpeg dependencies remain unchanged |
 | MSVC main CI failed with C3538 in rtp.cpp | Split mixed-type auto declarations, preserve MSVC C++20 build, initialize SDL explicitly for the custom main |
 | Setup ignored incompatible existing schema/readiness; room creation/invite attempts lacked account budgets | Validate schema/index readiness, additive optional attributes and private limits collection; persisted budgets and cleanup regression |
 
@@ -42,7 +44,7 @@ Total child CPU time was 30.186 / 28.783 / 25.657 seconds, including host, two s
 
 ### CI and sanitizer status
 
-The inspected main run [38456314108](https://github.com/eoftisreal/party/actions/runs/38456314108) passed backend/Linux and failed Windows compilation at `native/src/rtp.cpp:30` with MSVC C3538. PR #2's first Linux run independently reproduced the viewer-departure failure in the new separate-process test after passing compile/unit/clean/impaired media stages; subsequent fixes address that failure. Final PR CI results and fresh sanitizer results are recorded here when completed. A workflow definition or queued job is not a test pass.
+The inspected main run [38456314108](https://github.com/eoftisreal/party/actions/runs/38456314108) passed backend/Linux and failed Windows compilation at `native/src/rtp.cpp:30` with MSVC C3538. PR #2's first Linux run independently reproduced the viewer-departure failure in the new separate-process test after passing compile/unit/clean/impaired media stages; subsequent fixes address that failure. The first PR Windows job built all MSVC executables, copied runtime DLLs and passed all three C++ test executables, then failed generating media because the minimal CLI lacks lavfi. A portable generator fallback now addresses that failure. Run 38469440005 passed backend and the full Linux sanitizer/media/separate-process job for f8727c3; its Windows job is still pending. The development environment disconnected during the subsequent outage test, so that interrupted test and fresh local sanitizer runs are not counted as passes. Latest CI results are linked in PR #2. A workflow definition or queued job is not a test pass.
 
 ## External requirements still outstanding
 
@@ -63,6 +65,8 @@ python3 tools/generate_media.py /tmp/party-test.mp4
 python3 tools/run_loopback.py build/party_loopback /tmp/party-test.mp4
 python3 tools/run_loopback.py build/party_loopback /tmp/party-test.mp4 --impair
 python3 tools/two_process.py build/party /tmp/party-test.mp4 --report two-process.json
+# Optional: real 102-second coordination outage and fresh-generation recovery
+python3 tools/two_process.py build/party /tmp/party-test.mp4 --outage --report outage.json
 ```
 
 OpenSSL and Node.js 22 are required for the TLS fixture. It binds only to loopback, uses temporary keys/synthetic account secrets, keeps TLS verification enabled, and never reuses developer credentials. Earlier intermediate executable failures are recorded above; they were used to find integration defects rather than treated as passing evidence.

@@ -86,7 +86,7 @@ Signaling::Signaling(std::unique_ptr<AppwriteApi> api, Json room, bool host) : a
     request_=[this](const auto& method,const auto& path,const auto& data){return api_->request(method,path,data);};
 }
 Signaling::~Signaling() { stop(); }
-void Signaling::start() { if(worker_.joinable()) throw std::logic_error("Signaling already started"); worker_ = std::jthread([this](std::stop_token token) { run(token); }); }
+void Signaling::start() { if(worker_.joinable()) throw std::logic_error("Signaling already started"); leaseDeadlineUs_=nowUs()+options_.leaseUs*5/6; worker_ = std::jthread([this](std::stop_token token) { run(token); }); }
 void Signaling::send(const std::string& to, const std::string& generation, const Json& message) {
     Json input = message; input["to"] = to; input["generation"] = generation; input["messageId"] = randomId();
     std::lock_guard lock(mutex_);
@@ -167,7 +167,8 @@ void Signaling::run(std::stop_token stop) {
                 lastRealtime=now; try{notifyRealtime();}catch(const std::exception&){}
             }
             if(now-lastHeartbeat>=options_.heartbeatUs) {
-                request("POST","/heartbeat"); lastHeartbeat=now; leaseRefresh=nowUs();
+                request("POST","/heartbeat"); lastHeartbeat=now; leaseRefresh=now;
+                leaseDeadlineUs_=now+options_.leaseUs*5/6; // Request start is conservative under response latency.
                 if(suspended){event({{"event","coordination-restored"}});suspended=false;}
             }
             Json acks;
@@ -208,9 +209,9 @@ void Signaling::run(std::stop_token stop) {
         } catch(const HttpError& e) {
             if(e.code=="PEER_EXPIRED") {
                 try {
-                    auto room=request("POST","/join");
+                    const auto joinedAt=nowUs();auto room=request("POST","/join");
                     {std::lock_guard lock(mutex_);commands_.clear();delivery_.clear();}
-                    room["event"]="rejoined";event(room);suspended=false;leaseRefresh=nowUs();lastRoom=lastPoll=lastHeartbeat=0;
+                    room["event"]="rejoined";event(room);suspended=false;leaseRefresh=joinedAt;leaseDeadlineUs_=joinedAt+options_.leaseUs*5/6;lastRoom=lastPoll=lastHeartbeat=0;
                     continue;
                 } catch(const std::exception&) {++failures;}
             } else if(e.status==401 || e.status==403 || e.status==404 || e.status==410) {
