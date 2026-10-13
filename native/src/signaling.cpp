@@ -55,6 +55,9 @@ void requireHttps(const std::string& value) { if (!value.starts_with("https://")
 }
 AppwriteApi::AppwriteApi() : functionUrl_(env("PARTY_FUNCTION_URL")), endpoint_(env("PARTY_APPWRITE_ENDPOINT")), project_(env("PARTY_PROJECT_ID")), sessionSecret_(env("PARTY_SESSION_SECRET")) {
     requireHttps(functionUrl_); while (functionUrl_.ends_with('/')) functionUrl_.pop_back();
+    if(sessionSecret_.size()>8192 || sessionSecret_.find_first_of("\r\n")!=std::string::npos ||
+       project_.size()>36 || project_.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")!=std::string::npos)
+        throw std::invalid_argument("Invalid Appwrite session/project configuration");
     if (!sessionSecret_.empty()) { requireHttps(endpoint_); if (project_.empty()) throw std::invalid_argument("Appwrite project required for session auth"); }
 }
 std::string AppwriteApi::jwt() {
@@ -133,13 +136,17 @@ void Signaling::run(std::stop_token stop) {
     const auto base="/v1/rooms/"+roomId();
     auto request=[&](const std::string& method,const std::string& path,const Json& data=Json::object()){return request_(method,base+path,data);};
     int64_t lastPoll=0,lastRoom=0,lastHeartbeat=0,lastRealtime=0,ackRetryAt=0,leaseRefresh=nowUs();
-    unsigned failures=0; bool suspended=false;
+    unsigned failures=0; bool suspended=false, eventOverflow=false;
     auto event=[&](Json value) {
         std::lock_guard lock(mutex_);
         const auto kind=value.at("event").get<std::string>();
         if(kind=="closed") events_.clear();
         if(kind=="room") std::erase_if(events_,[](const Json& e){return e.value("event","")=="room";});
-        if(events_.size()>=128) throw std::runtime_error("Signaling event queue full");
+        if(events_.size()>=128) {
+            // A stalled application must fail closed without terminating this worker.
+            events_.clear();events_.push_back({{"event","closed"},{"code","EVENT_QUEUE_FULL"}});
+            eventOverflow=true;return;
+        }
         events_.push_back(std::move(value));
     };
     auto snapshot=[&](Json room) {
@@ -152,7 +159,7 @@ void Signaling::run(std::stop_token stop) {
         {std::lock_guard lock(mutex_); delivery_.authorize(generation,sender,closed);}
         room["event"]="room"; event(room);
     };
-    while(!stop.stop_requested()) {
+    while(!stop.stop_requested() && !eventOverflow) {
         try {
             const auto now=nowUs();
             // Realtime is optional. Its connection errors must never block the authoritative HTTP path.

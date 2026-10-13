@@ -111,18 +111,18 @@ int main(int argc, char** argv) {
         std::signal(SIGINT, interrupt); std::signal(SIGTERM, interrupt);
         std::cout << (host ? "Commands: play, pause, seek SECONDS, stop, stats, quit\n" : "Commands: stats, quit\n");
         int64_t peerStarted = 0, disconnectedSince = 0, lastState = 0, lastPing = 0, lastStats = 0;
-        bool wasConnected = false, resume = true, coordinationActive=true;
+        bool wasConnected = false, wantsPlay = true, coordinationActive=true;
         uint64_t sentEpoch=UINT64_MAX;
         while (!quitting) {
             for (const auto& event : signaling.events()) {
                 const auto kind = event.at("event").get<std::string>();
                 if (kind == "closed") { std::cerr << "Room unavailable: " << event.value("code", "closed") << '\n'; quitting = true; break; }
                 if(kind=="coordination-lost" || kind=="rejoined") {
-                    if(source) {resume=source->state().playing || resume;source->pause();}
+                    if(source) {source->pause();}
                     if(peer)peer->close();
                     {std::lock_guard lock(peerMutex);peer.reset();}
                     if(player){player->reset();if(host){const auto t=nowUs();player->clock.sample(t,t,t,t);}}
-                    authorizing.clear();remoteUser.clear();generation.clear();wasConnected=false;
+                    authorizing.clear();remoteUser.clear();generation.clear();wasConnected=false;disconnectedSince=0;
                     coordinationActive=kind=="rejoined";
                 }
                 if(kind=="coordination-restored") coordinationActive=true;
@@ -134,12 +134,12 @@ int main(int argc, char** argv) {
                         online = true;
                         const auto connection=event.value("connection",Json());
                         if(peer && connection.is_object() && connection.value("generation","")==generation && connection.value("state","")=="closed") {
-                            resume=source->state().playing || resume;source->pause();peer->close();
+                            source->pause();peer->close();
                             {std::lock_guard lock(peerMutex);peer.reset();}wasConnected=false;
                         }
                         const auto sessionVersion = m.value("sessionVersion", "");
                         if (peer && m.at("userId") == remoteUser && !remoteSessionVersion.empty() && remoteSessionVersion != sessionVersion) {
-                            resume = source->state().playing; source->pause(); peer->close();
+                            source->pause(); peer->close();
                             { std::lock_guard lock(peerMutex); peer.reset(); }
                             wasConnected = false;
                         }
@@ -149,16 +149,17 @@ int main(int argc, char** argv) {
                         }
                     }
                     if (!online && peer) {
-                        resume = source->state().playing; source->pause(); peer->close();
+                        source->pause(); peer->close();
                         { std::lock_guard lock(peerMutex); peer.reset(); }
                         remoteUser.clear(); authorizing.clear(); wasConnected = false;
                     }
                 }
                 if (kind == "authorized" && host && coordinationActive) {
+                    if(!signaling.current({{"generation",event.at("generation")},{"from",event.at("viewerId")},{"type","answer"}})){authorizing.clear();continue;}
                     if (peer) peer->close();
                     remoteUser = event.at("viewerId"); generation = event.at("generation");
                     const auto next = createPeer(); { std::lock_guard lock(peerMutex); peer = next; }
-                    authorizing.clear(); next->offer(); peerStarted = nowUs(); wasConnected = false; sentEpoch=UINT64_MAX;
+                    authorizing.clear(); next->offer(); peerStarted = nowUs(); wasConnected = false; disconnectedSince=0; sentEpoch=UINT64_MAX;
                 }
                 if(kind=="signal") {
                     const auto id=event.at("messageId").get<std::string>();
@@ -181,10 +182,10 @@ int main(int argc, char** argv) {
                 for (const auto& message : peer->takeSignals()) signaling.send(remoteUser, generation, message);
                 const bool connected = peer->connected();
                 if (host && connected && !wasConnected) {
-                    source->seek(source->state().movieUs); if (resume) source->play(); source->keyframe(); disconnectedSince = 0;
+                    source->seek(source->state().movieUs); if (wantsPlay) source->play(); source->keyframe(); disconnectedSince = 0;
                 }
                 if (host && peer->failed() && !disconnectedSince) {
-                    disconnectedSince = nowUs(); resume = source->state().playing; source->pause();
+                    disconnectedSince = nowUs(); source->pause();
                 }
                 if (host && authorizing.empty() && ((disconnectedSince && nowUs()-disconnectedSince > 3000000) || (!connected && nowUs()-peerStarted > 35000000))) {
                     authorizing = remoteUser; signaling.authorize(remoteUser, true); peerStarted = nowUs(); disconnectedSince = 0;
@@ -207,9 +208,9 @@ int main(int argc, char** argv) {
             if (source && !source->error().empty()) throw std::runtime_error(source->error());
             if (auto line = command()) {
                 if (*line == "quit") quitting = true;
-                else if (source && *line == "play") { resume = true; source->play(); }
-                else if (source && *line == "pause") { resume = false; source->pause(); }
-                else if (source && *line == "stop") { resume = false; source->stop(); }
+                else if (source && *line == "play") { wantsPlay = true; if(coordinationActive && peer && peer->connected()) source->play(); }
+                else if (source && *line == "pause") { wantsPlay = false; source->pause(); }
+                else if (source && *line == "stop") { wantsPlay = false; source->stop(); }
                 else if (source && line->starts_with("seek ")) {
                     const double seconds = std::stod(line->substr(5));
                     if (!std::isfinite(seconds) || seconds < 0 || seconds > 86400*365) throw std::invalid_argument("Invalid seek position");

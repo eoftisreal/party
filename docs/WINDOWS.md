@@ -2,7 +2,7 @@
 
 ## Build
 
-Install Visual Studio 2022 with Desktop development with C++, CMake and Ninja; Git and Python 3 are also needed for the test scripts. Use an x64 Native Tools PowerShell. The manifest pins a vcpkg baseline with FFmpeg 7.1.1; local Linux verification used FFmpeg 6.1.1. **Windows builds and device output were not run in the development container.**
+Install Visual Studio 2022 with Desktop development with C++, CMake and Ninja; Git, Python 3, Node.js 22 and OpenSSL (included in Git for Windows) are needed for the test scripts. Use an x64 Native Tools PowerShell. The manifest pins a vcpkg baseline with FFmpeg 7.1.1; local Linux verification used FFmpeg 6.1.1. Windows CI uses MSVC on Windows Server 2022 and SDL dummy devices; physical Windows 11 output/GPU acceptance remains separate. Consult [the current audit record](AUDIT.md) for actual CI results.
 
 ```powershell
 git clone https://github.com/microsoft/vcpkg.git C:\dev\vcpkg
@@ -11,7 +11,7 @@ $env:VCPKG_ROOT = 'C:\dev\vcpkg'
 git clone https://github.com/eoftisreal/party.git C:\dev\party
 cd C:\dev\party
 # Check out the development PR branch until it is merged.
-git checkout feat/webrtc-streaming-prototype
+git checkout fix/reliable-signaling-and-windows
 cmake -S . -B build -G Ninja `
   -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" `
   -DVCPKG_TARGET_TRIPLET=x64-windows -DCMAKE_BUILD_TYPE=Release
@@ -32,15 +32,23 @@ If DLLs are missing, verify the vcpkg `bin` directory on PATH and the CMake app-
 python tools/generate_media.py "$env:TEMP/party-test.mp4"
 python tools/run_loopback.py build/party_loopback.exe "$env:TEMP/party-test.mp4"
 python tools/run_loopback.py build/party_loopback.exe "$env:TEMP/party-test.mp4" --impair
+cd backend
+npm ci
+cd ..
+python tools/two_process.py build/party.exe "$env:TEMP/party-test.mp4" --report two-process.json
 ```
 
 This opens two real WebRTC peer connections on the same machine and sends actual H.264/Opus over local UDP + DTLS/SRTP. The signaling exchange is in process; it does **not** verify Appwrite or NAT traversal. The test uses SDL dummy audio and decodes video in memory. `--window` also exercises SDL's software drawing with a dummy video driver; it is not a physical display test. `--hardware` requests auto encoder probing, with software fallback. All source media is generated locally and need not be shipped to the viewer.
 
+`two_process.py` starts the actual `party.exe host` and `party.exe viewer` as separate processes. A loopback TLS fixture runs the production backend authorization logic with synthetic authentication/in-memory transactions. It tests private invitation joins, early SDP/ICE retries, dropped HTTP signaling/ACK responses, JWT renewal after a simulated 401, pause/resume, four forward/backward seeks, viewer leave/rejoin, host closure and an empty viewer working directory. It does **not** prove Appwrite Cloud, real JWT expiry, Realtime or Internet/NAT behavior. The test creates temporary TLS keys and supplies a private CA; TLS verification stays enabled. Never use fixture credentials/server outside tests. With the Visual Studio generator use `build/Release/party.exe` and matching loopback executable paths.
+
 ## Appwrite-coordinated streaming
 
-Deploy and smoke-test Appwrite as in [APPWRITE.md](APPWRITE.md). Create two user sessions through your existing login integration. In **each** user's terminal:
+Deploy and smoke-test Appwrite as in [APPWRITE.md](APPWRITE.md). Create two user sessions through your existing login integration. In **each** user's terminal, clear any diagnostic `PARTY_BIND_ADDRESS` and `PARTY_CA_BUNDLE` from local fixture testing:
 
 ```powershell
+Remove-Item Env:PARTY_BIND_ADDRESS -ErrorAction SilentlyContinue
+Remove-Item Env:PARTY_CA_BUNDLE -ErrorAction SilentlyContinue
 $env:PARTY_FUNCTION_URL = 'https://your-function-domain.appwrite.run'
 $env:PARTY_APPWRITE_ENDPOINT = 'https://your-region.cloud.appwrite.io/v1'
 $env:PARTY_PROJECT_ID = 'your-project'
@@ -67,7 +75,7 @@ Share the printed room ID and invite code privately. On the viewer PC, use a **d
 
 The viewer receives the live encoded stream and needs no local movie. Close the SDL window or enter `quit` to leave. Host terminal commands: `play`, `pause`, `seek 120`, `stop`, `stats`, `quit`. `seek` uses movie seconds. Controls belong to the host. Preview uses the same stream and playout delay as viewers.
 
-Allow the applications' UDP traffic through Windows Firewall on the networks used for the test. First use two PCs on the same LAN; then different Internet connections. STUN must be reachable for server-reflexive candidates. ICE failures are reported; the host replaces the connection generation after failure, preserving movie position. A disconnected host stops advancing playback until a viewer reconnects. No complete movie is uploaded to Appwrite or written by the viewer.
+Allow the applications' UDP traffic through Windows Firewall on the networks used for the test. First use two PCs on the same LAN; then different Internet connections. STUN must be reachable for server-reflexive candidates. ICE failures are reported; the host replaces the connection generation after failure, preserving movie position. A disconnected host stops advancing playback until a viewer reconnects, retaining the user's intended play/pause state. A host paused before disconnection stays paused after reconnection. Appwrite outages pause/close media at 100 seconds without a heartbeat; expired membership rejoins, while a replaced session fails closed. No complete movie is uploaded to Appwrite or written by the viewer.
 
 ## Optional UDP TURN
 

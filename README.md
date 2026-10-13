@@ -4,12 +4,13 @@ A host streams a local movie to one remote viewer using **H.264/Opus over encryp
 
 The standalone `party` application supports host play/pause/seek/stop, optional local preview, viewer playback, ICE connection replacement, bounded jitter buffering, NACK/PLI recovery, network statistics and configurable UDP STUN/TURN. The transport is pinned libdatachannel; media decoding/encoding is FFmpeg; prototype output is SDL2. Viewer media remains in memory.
 
-**Status:** real 1080p local peer streaming has been tested, including controls and reconnection. Appwrite's live deployment, Realtime, cross-Internet NAT/TURN, physical Windows output and GPU encoding still require external verification. The congestion controller is a prototype, not production libwebrtc/GCC. See the measured results and limitations before integration.
+**Status:** real 1080p local peer streaming has been tested, including controls, reconnection and separate host/viewer processes against a local TLS signaling fixture. Appwrite's live deployment, Realtime, cross-Internet NAT/TURN, physical Windows output and GPU encoding still require external verification. The congestion controller is a prototype, not production libwebrtc/GCC. See the measured results and limitations before integration.
 
 - [Windows build and remote test](docs/WINDOWS.md)
 - [Appwrite setup, schema and API](docs/APPWRITE.md)
 - [Architecture and transport evaluation](docs/ARCHITECTURE.md)
-- [Tests and measurements](docs/TESTS.md)
+- [Post-merge audit and current verification](docs/AUDIT.md)
+- [Original tests and measurements](docs/TESTS.md)
 - [Integration into the existing player](docs/INTEGRATION.md)
 
 ## Linux quick test

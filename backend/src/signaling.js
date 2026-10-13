@@ -53,8 +53,8 @@ export function makeSignalingService(store, rooms) {
       return store.atomic(async s => {
         const { room } = await rooms.authorize(s, id, user, session);
         if (room.hostId !== user || input.viewerId === user) fail(403, 'HOST_ONLY', 'Only host can authorize streaming');
-        const { member: viewer } = await rooms.authorize(s, id, input.viewerId, null, false);
-        if (Date.parse(viewer.lastSeenAt) + 120000 <= rooms.now()) fail(403, 'REMOTE_PEER_EXPIRED', 'Viewer offline');
+        const viewer = await s.getMember(memberId(id, input.viewerId));
+        if (!viewer || Date.parse(viewer.lastSeenAt) + 120000 <= rooms.now()) fail(403, 'REMOTE_PEER_EXPIRED', 'Viewer offline');
         const pid = peerId(id, input.viewerId), previous = await s.getPeer(pid);
         if (input.requestId && previous?.requestId === input.requestId && previous.hostSession === session && previous.viewerSession === viewer.sessionId) {
           if(previous.state === 'closed') fail(409,'STALE_GENERATION','Connection already closed');

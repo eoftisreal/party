@@ -13,7 +13,7 @@ public:
     void pump(int64_t now);
     int64_t queueUs() const;
     void clear();
-    std::atomic<uint64_t> bytesSent{0}, dropped{0};
+    std::atomic<uint64_t> bytesSent{0}, dropped{0}, discarded{0};
 private:
     std::atomic<unsigned>& rate_;
     std::atomic<bool>& keyframe_;
@@ -62,6 +62,7 @@ private:
     std::shared_ptr<RtpReceiver> videoReceiver_, audioReceiver_;
     std::shared_ptr<BoundedPacer> pacer_;
     mutable std::mutex mutex_;
+    std::recursive_mutex callbackMutex_;
     std::deque<Json> outbound_;
     std::string remoteSdp_;
     std::set<std::string> appliedCandidates_;

@@ -141,6 +141,18 @@ export function makeRoomsService(store, { now = () => Date.now(), random = rando
           await s.updateRoom(r.$id, { status: 'closed', revision: (fresh.revision || 0) + 1 });
         });
       }
+      // Closed rooms are retained until one day after their original expiry for diagnostics.
+      // Transactionally delete all dependent records; never prune an active room.
+      for (const r of await store.listRooms()) if(r.status==='closed' && Date.parse(r.expiresAt)+86400000<=now()) {
+        await store.atomic(async s=>{
+          const fresh=await lockRoom(s,r.$id);
+          if(fresh.status!=='closed' || Date.parse(fresh.expiresAt)+86400000>now())return;
+          for(const m of await s.listSignals(r.$id))await s.deleteSignal(m.$id);
+          for(const p of await s.listPeers(r.$id))await s.deletePeer(p.$id);
+          for(const m of await s.listMembers(r.$id))await s.deleteMember(m.$id);
+          await s.deleteRoom(r.$id);
+        });
+      }
       for (const r of await store.listRooms()) for (const m of await store.listSignals(r.$id))
         if (Date.parse(m.expiresAt) <= now()) { try { await store.deleteSignal(m.$id); } catch (e) { if (e.code !== 404) throw e; } }
       for (const n of await store.listNotifications()) if (Date.parse(n.expiresAt) <= now()) {

@@ -11,6 +11,10 @@ int main() {
         expect(clock.offsetUs() == 49500 && clock.rttUs() == 3000, "NTP estimator arithmetic");
         expect(!clock.sample(9,10,11,8), "invalid clock order");
         expect(clock.sample(1000000,1060000,1061000,1020000) && clock.offsetUs() == 49500, "reject worse queueing bias");
+        expect(clock.sample(32000000,32101000,32102000,32020000), "clock refresh after network path changes");
+        expect(clock.offsetUs()==54500, "clock correction must be bounded and escape stale best RTT");
+        clock.reset();expect(!clock.ready(), "old connection clock survived reset");
+        expect(clock.sample(1000000,1051000,1052000,1004000) && clock.offsetUs()==49500,"new connection clock did not initialize");
         const int64_t anchor = 60000000000;
         for (const auto rate : {48000u, 90000u}) {
             const auto ticks = uint32_t((anchor/1000000)*rate);

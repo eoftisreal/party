@@ -1,0 +1,105 @@
+{
+  "stream": {
+    "deferredIce": 2,
+    "duplicateSdpApplications": 4,
+    "durationUs": 17009141,
+    "host": {
+      "candidateTypes": [
+        1,
+        1
+      ],
+      "connected": true,
+      "connectionState": 2,
+      "dataBytesReceived": 801,
+      "dataBytesSent": 15650,
+      "iceState": 3,
+      "pacerDroppedPackets": 0,
+      "pacerEpochDiscardedPackets": 0,
+      "pacerQueueUs": 0,
+      "rtpVideoBytesSent": 1497549,
+      "sctpRttMs": 14,
+      "sendFailures": 0,
+      "targetBitrate": 2500000
+    },
+    "impaired": true,
+    "injectedDrops": 21,
+    "injectedReordering": 63,
+    "player": {
+      "audioClockUs": 0,
+      "audioEndUs": 0,
+      "audioEnergy": 4894.4929140007625,
+      "audioFrontUs": 0,
+      "audioQueuedBytes": 0,
+      "avDriftUs": 16717,
+      "buffering": true,
+      "clockOffsetUs": 37,
+      "clockRttUs": 180,
+      "concealedSamples": 0,
+      "decodeErrors": 0,
+      "decodedAudioPackets": 653,
+      "decodedVideoFrames": 334,
+      "droppedAudioPackets": 72,
+      "droppedVideoFrames": 7,
+      "epoch": 9,
+      "hostAnchorUs": 2808907848,
+      "maxAvDriftUs": 46641,
+      "movieUs": 0,
+      "playbackCutoffUs": 2808068206,
+      "playing": false,
+      "rebufferings": 0,
+      "renderedVideoFrames": 274,
+      "videoChecksum": 15977910319625295756,
+      "videoFrontUs": 0
+    },
+    "source": {
+      "audioPackets": 655,
+      "bitrate": 2500000,
+      "encodedBytes": 4164427,
+      "encoder": "libx264",
+      "height": 1080,
+      "videoFrames": 387,
+      "width": 1920
+    },
+    "test": "real-loopback",
+    "viewer": {
+      "audio": {
+        "duplicates": 0,
+        "frames": 242,
+        "jitterUs": 146,
+        "lost": 0,
+        "malformed": 0,
+        "nacks": 0,
+        "rtpPackets": 242
+      },
+      "candidateTypes": [
+        1,
+        1
+      ],
+      "connected": true,
+      "connectionState": 2,
+      "dataBytesReceived": 15650,
+      "dataBytesSent": 801,
+      "iceState": 3,
+      "sctpRttMs": 1,
+      "sendFailures": 0,
+      "targetBitrate": 2500000,
+      "video": {
+        "duplicates": 0,
+        "frames": 144,
+        "jitterUs": 2902,
+        "lost": 0,
+        "malformed": 0,
+        "nacks": 57,
+        "rtpPackets": 2009
+      }
+    }
+  },
+  "resources": {
+    "wallSeconds": 17.122,
+    "exitCode": 0,
+    "viewerWorkingDirectoryFiles": [],
+    "userCpuSeconds": 10.427,
+    "systemCpuSeconds": 0.555,
+    "peakRssKiB": 190312
+  }
+}

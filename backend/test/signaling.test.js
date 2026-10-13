@@ -102,3 +102,18 @@ test('persisted creation and failed invite budgets reject API abuse',async()=>{
   for(let i=0;i<30;++i)await assert.rejects(f.rooms.join(r.roomId,'attacker','x'.repeat(32)),rejects('INVALID_INVITE'));
   await assert.rejects(f.rooms.join(r.roomId,'attacker',r.inviteCode),rejects('RATE_LIMIT'));
 });
+
+test('queued authorization after viewer departure does not revoke host membership',async()=>{
+  const f=await connected();await f.rooms.leave(f.r.roomId,'viewer',f.v.sessionId);
+  await assert.rejects(f.signaling.connect(f.r.roomId,'host',f.r.sessionId,{viewerId:'viewer'}),rejects('REMOTE_PEER_EXPIRED'));
+  assert.equal((await f.rooms.heartbeat(f.r.roomId,'host',f.r.sessionId)).ok,true);
+  assert.equal((await f.rooms.read(f.r.roomId,'host',f.r.sessionId)).status,'open');
+});
+
+test('cleanup expires receipts and removes retained closed room dependencies',async()=>{
+  const f=await connected();await f.send('host','offer',{sdp:sdp('sendonly')});
+  await f.rooms.close(f.r.roomId,'host',f.r.sessionId);f.advance(120001);await f.rooms.cleanup();
+  assert.equal(f.tables.Notification.size,0);assert.equal(f.tables.Room.size,1);
+  f.advance(2*86400000);await f.rooms.cleanup();
+  for(const name of ['Room','Member','Peer','Signal','Notification'])assert.equal(f.tables[name].size,0,name);
+});

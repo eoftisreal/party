@@ -1,5 +1,7 @@
 # Verification record
 
+The original PR #1 results below are historical. See [the post-merge audit](AUDIT.md) for new regression tests, separate-process measurements, defects discovered during verification, and current CI/external requirements.
+
 Local verification completed on 2026-10-13 in the Ubuntu 24.04 development container, GCC 13, FFmpeg 6.1.1, libdatachannel 0.24.1 at the pinned commit. The test movie is generated `testsrc2` at **1920×1080/30fps**, with real encoded audio. No original movie is included in Git.
 
 ## Ran and passed

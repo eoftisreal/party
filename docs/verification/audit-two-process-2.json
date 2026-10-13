@@ -1,0 +1,188 @@
+{
+  "coordination": "local TLS fixture (not Appwrite Cloud)",
+  "network": "same-machine UDP/DTLS/SRTP",
+  "separateProcesses": true,
+  "host": {
+    "media": {
+      "audioPackets": 1731,
+      "bitrate": 2500000,
+      "encodedBytes": 11037976,
+      "encoder": "libx264",
+      "height": 1080,
+      "videoFrames": 1030,
+      "width": 1920
+    },
+    "network": {
+      "candidateTypes": [
+        1,
+        1
+      ],
+      "connected": true,
+      "connectionState": 2,
+      "dataBytesReceived": 212,
+      "dataBytesSent": 6403,
+      "iceState": 3,
+      "pacerDroppedPackets": 0,
+      "pacerEpochDiscardedPackets": 0,
+      "pacerQueueUs": 0,
+      "rtpVideoBytesSent": 1500098,
+      "sctpRttMs": 16,
+      "sendFailures": 0,
+      "targetBitrate": 2500000
+    }
+  },
+  "firstViewer": {
+    "network": {
+      "audio": {
+        "duplicates": 0,
+        "frames": 1487,
+        "jitterUs": 353,
+        "lost": 0,
+        "malformed": 0,
+        "nacks": 0,
+        "rtpPackets": 1487
+      },
+      "candidateTypes": [
+        1,
+        3
+      ],
+      "connected": true,
+      "connectionState": 2,
+      "dataBytesReceived": 43785,
+      "dataBytesSent": 2650,
+      "iceState": 3,
+      "sctpRttMs": 6,
+      "sendFailures": 0,
+      "targetBitrate": 2500000,
+      "video": {
+        "duplicates": 0,
+        "frames": 883,
+        "jitterUs": 3146,
+        "lost": 31,
+        "malformed": 0,
+        "nacks": 48,
+        "rtpPackets": 12334
+      }
+    },
+    "player": {
+      "audioClockUs": 2558885096,
+      "audioEndUs": 2559104866,
+      "audioEnergy": 11045.407093498856,
+      "audioFrontUs": 2559104950,
+      "audioQueuedBytes": 84392,
+      "avDriftUs": 6501,
+      "buffering": false,
+      "clockOffsetUs": 48,
+      "clockRttUs": 268,
+      "concealedSamples": 0,
+      "decodeErrors": 0,
+      "decodedAudioPackets": 1487,
+      "decodedVideoFrames": 860,
+      "droppedAudioPackets": 36,
+      "droppedVideoFrames": 23,
+      "epoch": 7,
+      "hostAnchorUs": 2559428576,
+      "maxAvDriftUs": 54336,
+      "movieUs": 8803651,
+      "playbackCutoffUs": 2554624925,
+      "playing": true,
+      "rebufferings": 2,
+      "renderedVideoFrames": 774,
+      "videoChecksum": 2640658094614786314,
+      "videoFrontUs": 2558924921
+    }
+  },
+  "secondViewer": {
+    "network": {
+      "audio": {
+        "duplicates": 0,
+        "frames": 240,
+        "jitterUs": 470,
+        "lost": 0,
+        "malformed": 0,
+        "nacks": 0,
+        "rtpPackets": 240
+      },
+      "candidateTypes": [
+        1,
+        1
+      ],
+      "connected": true,
+      "connectionState": 2,
+      "dataBytesReceived": 6281,
+      "dataBytesSent": 212,
+      "iceState": 3,
+      "sctpRttMs": 1,
+      "sendFailures": 0,
+      "targetBitrate": 2500000,
+      "video": {
+        "duplicates": 0,
+        "frames": 142,
+        "jitterUs": 2806,
+        "lost": 0,
+        "malformed": 0,
+        "nacks": 0,
+        "rtpPackets": 1966
+      }
+    },
+    "player": {
+      "audioClockUs": 2572289669,
+      "audioEndUs": 2572508585,
+      "audioEnergy": 1783.3014146684773,
+      "audioFrontUs": 2572508669,
+      "audioQueuedBytes": 84064,
+      "avDriftUs": 13764,
+      "buffering": false,
+      "clockOffsetUs": 29,
+      "clockRttUs": 299,
+      "concealedSamples": 0,
+      "decodeErrors": 0,
+      "decodedAudioPackets": 240,
+      "decodedVideoFrames": 141,
+      "droppedAudioPackets": 2,
+      "droppedVideoFrames": 5,
+      "epoch": 11,
+      "hostAnchorUs": 2572550891,
+      "maxAvDriftUs": 52901,
+      "movieUs": 13580792,
+      "playbackCutoffUs": 2567848657,
+      "playing": true,
+      "rebufferings": 1,
+      "renderedVideoFrames": 129,
+      "videoChecksum": 2166362900950308023,
+      "videoFrontUs": 2572336777
+    }
+  },
+  "seekEpochs": [
+    4,
+    5,
+    6,
+    7
+  ],
+  "viewerFiles": [],
+  "exitCodes": [
+    0,
+    0,
+    0
+  ],
+  "fixtureCounters": {
+    "signals": 9,
+    "acks": 5,
+    "offers": 3,
+    "answers": 2,
+    "joins": 3,
+    "closed": 2,
+    "signalResponseDropped": 1,
+    "ackResponseDropped": 1,
+    "jwtRequests": 5,
+    "expiredJwts": 2
+  },
+  "passed": true,
+  "resources": {
+    "scope": "all child processes (host, two viewers, Node fixture and OpenSSL)",
+    "userCpuSeconds": 26.941,
+    "systemCpuSeconds": 1.842,
+    "largestChildPeakRssKiB": 170832
+  },
+  "wallSeconds": 55.188
+}

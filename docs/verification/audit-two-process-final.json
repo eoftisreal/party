@@ -1,0 +1,189 @@
+{
+  "coordination": "local TLS fixture (not Appwrite Cloud)",
+  "network": "same-machine UDP/DTLS/SRTP",
+  "separateProcesses": true,
+  "host": {
+    "media": {
+      "audioPackets": 1430,
+      "bitrate": 2500000,
+      "encodedBytes": 9104724,
+      "encoder": "libx264",
+      "height": 1080,
+      "videoFrames": 850,
+      "width": 1920
+    },
+    "network": {
+      "candidateTypes": [
+        1,
+        1
+      ],
+      "connected": true,
+      "connectionState": 2,
+      "dataBytesReceived": 100,
+      "dataBytesSent": 2432,
+      "iceState": 3,
+      "pacerDroppedPackets": 0,
+      "pacerEpochDiscardedPackets": 0,
+      "pacerQueueUs": 6745,
+      "rtpVideoBytesSent": 554873,
+      "sctpRttMs": 13,
+      "sendFailures": 0,
+      "targetBitrate": 2500000
+    }
+  },
+  "firstViewer": {
+    "network": {
+      "audio": {
+        "duplicates": 0,
+        "frames": 1336,
+        "jitterUs": 317,
+        "lost": 0,
+        "malformed": 0,
+        "nacks": 0,
+        "rtpPackets": 1336
+      },
+      "candidateTypes": [
+        1,
+        1
+      ],
+      "connected": true,
+      "connectionState": 2,
+      "dataBytesReceived": 39994,
+      "dataBytesSent": 2462,
+      "iceState": 3,
+      "sctpRttMs": 5,
+      "sendFailures": 0,
+      "targetBitrate": 2500000,
+      "video": {
+        "duplicates": 0,
+        "frames": 791,
+        "jitterUs": 3134,
+        "lost": 0,
+        "malformed": 0,
+        "nacks": 0,
+        "rtpPackets": 11058
+      }
+    },
+    "player": {
+      "audioClockUs": 3006075443,
+      "audioEndUs": 3006276588,
+      "audioEnergy": 9924.42314344041,
+      "audioFrontUs": 3006276692,
+      "audioQueuedBytes": 77240,
+      "avDriftUs": 7992,
+      "buffering": false,
+      "clockOffsetUs": 0,
+      "clockRttUs": 249,
+      "concealedSamples": 0,
+      "decodeErrors": 0,
+      "decodedAudioPackets": 1336,
+      "decodedVideoFrames": 769,
+      "droppedAudioPackets": 26,
+      "droppedVideoFrames": 9,
+      "epoch": 7,
+      "hostAnchorUs": 3006564047,
+      "maxAvDriftUs": 45322,
+      "movieUs": 8767386,
+      "playbackCutoffUs": 3001796661,
+      "playing": true,
+      "rebufferings": 0,
+      "renderedVideoFrames": 685,
+      "videoChecksum": 14823546095909838233,
+      "videoFrontUs": 3006096663
+    }
+  },
+  "secondViewer": {
+    "network": {
+      "audio": {
+        "duplicates": 0,
+        "frames": 90,
+        "jitterUs": 624,
+        "lost": 0,
+        "malformed": 0,
+        "nacks": 0,
+        "rtpPackets": 90
+      },
+      "candidateTypes": [
+        1,
+        1
+      ],
+      "connected": true,
+      "connectionState": 2,
+      "dataBytesReceived": 2432,
+      "dataBytesSent": 100,
+      "iceState": 3,
+      "sctpRttMs": 1,
+      "sendFailures": 0,
+      "targetBitrate": 2500000,
+      "video": {
+        "duplicates": 0,
+        "frames": 52,
+        "jitterUs": 3279,
+        "lost": 0,
+        "malformed": 0,
+        "nacks": 0,
+        "rtpPackets": 723
+      }
+    },
+    "player": {
+      "audioClockUs": 3014394522,
+      "audioEndUs": 3014608709,
+      "audioEnergy": 668.6563567975311,
+      "audioFrontUs": 3014608827,
+      "audioQueuedBytes": 82248,
+      "avDriftUs": 11159,
+      "buffering": false,
+      "clockOffsetUs": -45,
+      "clockRttUs": 281,
+      "concealedSamples": 0,
+      "decodeErrors": 0,
+      "decodedAudioPackets": 90,
+      "decodedVideoFrames": 51,
+      "droppedAudioPackets": 0,
+      "droppedVideoFrames": 0,
+      "epoch": 11,
+      "hostAnchorUs": 3014795658,
+      "maxAvDriftUs": 19516,
+      "movieUs": 10643406,
+      "playbackCutoffUs": 3013028799,
+      "playing": true,
+      "rebufferings": 0,
+      "renderedVideoFrames": 41,
+      "videoChecksum": 14227931307619854783,
+      "videoFrontUs": 3014418919
+    }
+  },
+  "seekEpochs": [
+    4,
+    5,
+    6,
+    7
+  ],
+  "viewerFiles": [],
+  "exitCodes": [
+    0,
+    0,
+    0
+  ],
+  "coordinationSmoke": "deployment smoke script with synthetic authentication and in-memory DB (not Cloud)",
+  "fixtureCounters": {
+    "signals": 15,
+    "acks": 6,
+    "offers": 5,
+    "answers": 4,
+    "joins": 6,
+    "closed": 4,
+    "signalResponseDropped": 1,
+    "ackResponseDropped": 1,
+    "jwtRequests": 7,
+    "expiredJwts": 2
+  },
+  "passed": true,
+  "resources": {
+    "scope": "all child processes (host, two viewers, Node fixture/smoke and OpenSSL)",
+    "userCpuSeconds": 22.01,
+    "systemCpuSeconds": 1.768,
+    "largestChildPeakRssKiB": 179120
+  },
+  "wallSeconds": 48.967
+}

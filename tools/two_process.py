@@ -11,6 +11,10 @@ import secrets
 import ssl
 import urllib.request
 import shutil
+try:
+    import resource
+except ImportError:
+    resource=None
 import subprocess
 import tempfile
 import threading
@@ -72,12 +76,16 @@ with tempfile.TemporaryDirectory(prefix='party-processes-') as temporary:
     fixtureEnv=dict(base,TEST_HOST_TOKEN=hostToken,TEST_VIEWER_TOKEN=viewerToken,TEST_KEY=str(key),TEST_CERT=str(cert))
     try:
         server=subprocess.Popen(['node',str(root/'backend/test/tls-server.js')],env=fixtureEnv,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
-        port=json.loads(server.stdout.readline())['port'];base['PARTY_FUNCTION_URL']=f'https://127.0.0.1:{port}'
+        startup=server.stdout.readline()
+        if not startup:raise RuntimeError('TLS fixture did not start: '+server.stderr.read())
+        port=json.loads(startup)['port'];base['PARTY_FUNCTION_URL']=f'https://127.0.0.1:{port}'
+        base.update(PARTY_APPWRITE_ENDPOINT=base['PARTY_FUNCTION_URL'],PARTY_PROJECT_ID='offline-fixture')
+        base.pop('PARTY_JWT',None)
         hostDir=work/'host';hostDir.mkdir();viewerDir=work/'viewer';viewerDir.mkdir()
-        host=App([str(exe),'host','--file',str(movie),'--software'],dict(base,PARTY_JWT=hostToken),hostDir);apps.append(host)
+        host=App([str(exe),'host','--file',str(movie),'--software'],dict(base,PARTY_SESSION_SECRET=hostToken),hostDir);apps.append(host)
         room=host.line('Room: ');invite=host.line('Invite (share privately): ')
         def join():
-            v=App([str(exe),'viewer','--room',room,'--invite',invite,'--headless'],dict(base,PARTY_JWT=viewerToken),viewerDir);apps.append(v);return v
+            v=App([str(exe),'viewer','--room',room,'--invite',invite,'--headless'],dict(base,PARTY_SESSION_SECRET=viewerToken),viewerDir);apps.append(v);return v
         viewer=join()
         viewer.wait(lambda:viewer.latest('player','renderedVideoFrames')>25 and viewer.latest('player','decodedAudioPackets')>50)
         before=viewer.latest('player','renderedVideoFrames');host.command('pause');time.sleep(2.5);viewer.command('stats');time.sleep(.4)
@@ -92,18 +100,43 @@ with tempfile.TemporaryDirectory(prefix='party-processes-') as temporary:
         first=viewer.stats[-1];viewer.command('quit');viewer.process.wait(timeout=15)
         time.sleep(3);viewer=join()
         viewer.wait(lambda:viewer.latest('player','renderedVideoFrames')>25 and viewer.latest('player','decodedAudioPackets')>50)
-        second=viewer.stats[-1];host.command('quit');host.process.wait(timeout=15);viewer.process.wait(timeout=15)
+        second=viewer.stats[-1]
+        for app in [apps[1],viewer]:
+            assert max(s['player']['maxAvDriftUs'] for s in app.stats)<=60000,'A/V scheduling drift exceeded 60ms'
+            assert all(s['player']['decodeErrors']==0 for s in app.stats),'Decoder errors'
+            assert app.stats[-1]['player']['audioEnergy']>1 and app.stats[-1]['player']['videoChecksum']!=0,'No content-derived playback evidence'
+        host.command('stats');time.sleep(.2);report['host']=host.stats[-1]
+        host.command('quit');host.process.wait(timeout=15);viewer.process.wait(timeout=15)
         assert viewer.process.returncode==0 and host.process.returncode==0,'Unclean application shutdown'
         assert not list(viewerDir.rglob('*')),'Viewer wrote persistent files'
         report.update(firstViewer=first,secondViewer=second,seekEpochs=epochs,viewerFiles=[],exitCodes=[a.process.returncode for a in apps])
-        request=urllib.request.Request(f'https://127.0.0.1:{port}/test-metrics',headers={'Authorization':'Bearer '+hostToken})
+        # Exercise the deployment smoke script against the same offline fixture too.
+        def mint(secret):
+            req=urllib.request.Request(base['PARTY_APPWRITE_ENDPOINT']+'/account/jwts',data=b'{}',method='POST',
+                headers={'Content-Type':'application/json','X-Appwrite-Session':secret})
+            with urllib.request.urlopen(req,context=ssl.create_default_context(cafile=str(cert))) as response:return json.load(response)['jwt']
+        smoke=subprocess.run(['node',str(root/'backend/tools/smoke.js')],env=dict(base,
+            PARTY_HOST_JWT=mint(hostToken),PARTY_VIEWER_JWT=mint(viewerToken),NODE_EXTRA_CA_CERTS=str(cert)),capture_output=True,text=True,timeout=45)
+        if smoke.returncode:raise RuntimeError('Offline coordination smoke failed: '+smoke.stderr)
+        report['coordinationSmoke']='deployment smoke script with synthetic authentication and in-memory DB (not Cloud)'
+        request=urllib.request.Request(f'https://127.0.0.1:{port}/test-metrics' ,headers={'Authorization':'Bearer '+hostToken})
         with urllib.request.urlopen(request,context=ssl.create_default_context(cafile=str(cert))) as response:counts=json.load(response)
         server.terminate();server.wait(timeout=5)
         assert counts.get('signalResponseDropped')==1 and counts.get('ackResponseDropped')==1,'Lost-response scenarios not exercised'
+        assert counts['jwtRequests']>=5 and counts['expiredJwts']==2,'JWT 401 renewal not exercised'
         report['fixtureCounters']=counts;report['passed']=True
+    except Exception:
+        for index,app in enumerate(apps):
+            print('Process',index,'exit',app.process.poll(),'recent errors:',app.errors[-12:],'statistics:',app.stats,flush=True)
+        raise
     finally:
         for app in reversed(apps):app.finish()
         if server and server.poll() is None:server.terminate();server.wait(timeout=5)
+if resource:
+    usage=resource.getrusage(resource.RUSAGE_CHILDREN)
+    report['resources']={'scope':'all child processes (host, two viewers, Node fixture/smoke and OpenSSL)',
+        'userCpuSeconds':round(usage.ru_utime,3),'systemCpuSeconds':round(usage.ru_stime,3),
+        'largestChildPeakRssKiB':usage.ru_maxrss}
 report['wallSeconds']=round(time.monotonic()-start,3)
 output=json.dumps(report,indent=2)
 if args.report:pathlib.Path(args.report).write_text(output+'\n')

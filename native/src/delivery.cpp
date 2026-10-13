@@ -14,6 +14,8 @@ void SignalDelivery::authorize(std::string generation, std::string sender, bool 
     for (auto& [id, entry] : entries_) if (!current(entry.message) && entry.state != State::Acked) entry.state = State::Applied;
 }
 bool SignalDelivery::current(const Json& message) const {
+    if(!message.is_object() || !message.contains("generation") || !message.at("generation").is_string() ||
+       !message.contains("from") || !message.at("from").is_string() || !message.contains("type") || !message.at("type").is_string()) return false;
     return message.value("generation", "") == generation_ && !generation_.empty() && message.value("from", "") == sender_ &&
         (!closed_ || message.value("type", "") == "disconnect");
 }
@@ -22,6 +24,9 @@ void SignalDelivery::ingest(const Json& messages, int64_t time) {
     std::erase_if(entries_, [time](const auto& item){ return item.second.state == State::Acked && time > item.second.expiresAt; });
     for (const auto& message : messages) {
         if (!message.is_object() || !message.contains("messageId") || !hexId(message.at("messageId")) ||
+            !message.contains("from") || !message.at("from").is_string() || message.at("from").get_ref<const std::string&>().size()>36 ||
+            !message.contains("type") || !message.at("type").is_string() ||
+            (message.at("type")!="offer" && message.at("type")!="answer" && message.at("type")!="candidate" && message.at("type")!="disconnect") ||
             !message.contains("generation") || !hexId(message.at("generation")) || !message.contains("payload") || !message.at("payload").is_object())
             throw std::invalid_argument("Invalid signaling message");
         const auto id = message.at("messageId").get<std::string>();

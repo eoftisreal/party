@@ -34,7 +34,7 @@ void BoundedPacer::pump(int64_t now) {
         }
         send = send_;
     }
-    if (send) for (auto& m : ready) { bytesSent += m->size(); send(m); }
+    if (send) for (auto& m : ready) { send(m); bytesSent += m->size(); }
 }
 int64_t BoundedPacer::queueUs() const { std::lock_guard lock(mutex_); return int64_t(bytes_) * 8 * 1000000 / rate_.load(); }
 std::shared_ptr<Peer> Peer::create(bool host, const rtc::Configuration& config, FrameCallback frame, std::function<void(Json)> control) {
@@ -50,7 +50,8 @@ void Peer::init(const rtc::Configuration& config, FrameCallback frame, std::func
     }});
     pc_->onLocalCandidate([weak](const rtc::Candidate& c) { if (auto self = weak.lock()) {
         std::lock_guard lock(self->mutex_);
-        if (self->outbound_.size() < 128) self->outbound_.push_back({{"type", "candidate"}, {"payload", {{"candidate", std::string(c)}, {"mid", c.mid()}}}});
+        if(self->outbound_.size()>=128){++self->sendFailures;self->state_=rtc::PeerConnection::State::Failed;return;}
+        self->outbound_.push_back({{"type", "candidate"}, {"payload", {{"candidate", std::string(c)}, {"mid", c.mid()}}}});
     }});
     if (host_) {
         auto v = rtc::Description::Video("video", rtc::Description::Direction::SendOnly);
@@ -89,7 +90,9 @@ void Peer::setupChannel(std::shared_ptr<rtc::DataChannel> dc) {
     const auto weak = weak_from_this();
     dc->onMessage(nullptr, [weak](std::string message) { if (auto self = weak.lock()) {
         if (message.size() > 8192) return;
-        try { const auto j = Json::parse(message); if (j.is_object() && j.contains("type")) self->onControl_(j); }
+        try { const auto j = Json::parse(message);
+            std::lock_guard callbackLock(self->callbackMutex_);
+            if (!self->closed_ && j.is_object() && j.contains("type")) self->onControl_(j); }
         catch (const std::exception&) { /* malformed peer control is rejected */ }
     }});
 }
@@ -97,7 +100,10 @@ void Peer::receiverTrack(std::shared_ptr<rtc::Track> track, FrameCallback frame)
     const bool video = track->description().type() == "video";
     if (track->direction() != rtc::Description::Direction::RecvOnly || (!video && track->description().type() != "audio")) { track->close(); return; }
     const auto weak = weak_from_this();
-    auto receiver = std::make_shared<RtpReceiver>(video, std::move(frame), [weak] {
+    auto receiver = std::make_shared<RtpReceiver>(video, [weak,frame=std::move(frame)](EncodedFrame value) {
+        if(auto self=weak.lock()) {std::lock_guard callbackLock(self->callbackMutex_);
+            if(!self->closed_)frame(std::move(value));}
+    }, [weak] {
         if (auto self = weak.lock()) {
             // Called from pump on the application thread; rate-limit PLI.
             if (nowUs() - self->lastPli_ > 250000) {
@@ -134,7 +140,7 @@ bool Peer::signal(const Json& message) {
     else throw std::invalid_argument("Unauthorized signal direction");
     return true;
 }
-void BoundedPacer::clear() { std::lock_guard lock(mutex_);dropped+=queue_.size();queue_.clear();bytes_=0; }
+void BoundedPacer::clear() { std::lock_guard lock(mutex_);discarded+=queue_.size();queue_.clear();bytes_=0; }
 void Peer::discardQueuedMedia() { if(pacer_) pacer_->clear();forceKeyframe=true; }
 std::vector<Json> Peer::takeSignals() {
     std::lock_guard lock(mutex_); std::vector<Json> result(outbound_.begin(), outbound_.end()); outbound_.clear();
@@ -156,7 +162,11 @@ bool Peer::control(const Json& message) {
     try { return dc->send(message.dump()); } catch (const std::exception&) { ++sendFailures; return false; }
 }
 void Peer::pump() {
-    if (closed_) return;
+    if (closed_ || state_==rtc::PeerConnection::State::Failed) return;
+    try {
+    if(host_ && ((video_ && video_->isClosed()) || (audio_ && audio_->isClosed()))) {
+        ++sendFailures;state_=rtc::PeerConnection::State::Failed;if(pacer_)pacer_->clear();return;
+    }
     if (pacer_) pacer_->pump(nowUs());
     std::shared_ptr<RtpReceiver> v, a; std::shared_ptr<rtc::Track> vt;
     { std::lock_guard lock(mutex_); v = videoReceiver_; a = audioReceiver_; vt = video_; }
@@ -174,6 +184,11 @@ void Peer::pump() {
         vt->requestBitrate(controller_.update(loss, v->stats->jitterUs.load(), 0));
         previousReceived_ = received; previousLost_ = lost; lastFeedback_ = nowUs();
     }
+    } catch(const std::exception&) {
+        // Track closure can race a pacing/NACK/REMB callback. Reconnect, do not kill the room.
+        ++sendFailures;state_=rtc::PeerConnection::State::Failed;
+        if(pacer_)pacer_->clear();
+    }
 }
 bool Peer::connected() const { return state_ == rtc::PeerConnection::State::Connected; }
 bool Peer::failed() const { const auto state = state_.load(); return state == rtc::PeerConnection::State::Failed || state == rtc::PeerConnection::State::Disconnected || state == rtc::PeerConnection::State::Closed; }
@@ -185,11 +200,13 @@ Json Peer::stats() const {
     std::lock_guard lock(mutex_);
     if (videoReceiver_) result["video"] = videoReceiver_->stats->json();
     if (audioReceiver_) result["audio"] = audioReceiver_->stats->json();
-    if (pacer_) { result["rtpVideoBytesSent"] = pacer_->bytesSent.load(); result["pacerQueueUs"] = pacer_->queueUs(); result["pacerDroppedPackets"] = pacer_->dropped.load(); }
+    if (pacer_) { result["rtpVideoBytesSent"] = pacer_->bytesSent.load(); result["pacerQueueUs"] = pacer_->queueUs(); result["pacerDroppedPackets"] = pacer_->dropped.load(); result["pacerEpochDiscardedPackets"]=pacer_->discarded.load(); }
     return result;
 }
 void Peer::close() {
     if (closed_.exchange(true)) return;
+    // Drain external callbacks before callers release Player/MediaSource callback targets.
+    {std::lock_guard callbackLock(callbackMutex_);}
     std::shared_ptr<rtc::DataChannel> dc; { std::lock_guard lock(mutex_); dc = dc_; }
     if (dc) dc->resetCallbacks();
     pc_->resetCallbacks(); pc_->close();

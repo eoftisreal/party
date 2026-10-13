@@ -28,7 +28,7 @@ struct PlaybackState {
     Json json() const;
     static PlaybackState parse(const Json& j);
 };
-// NTP four-timestamp estimator; keeps the lowest-RTT sample to limit queueing bias.
+// NTP four-timestamp estimator; keeps the lowest-RTT sample over a renewing window, with bounded clock correction.
 class ClockEstimator {
 public:
     bool sample(int64_t t0, int64_t t1, int64_t t2, int64_t t3);
