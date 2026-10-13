@@ -13,6 +13,10 @@
 #include <unistd.h>
 #endif
 namespace {
+struct ScopeExit {
+    std::function<void()> action;
+    ~ScopeExit() { try { action(); } catch (...) { /* retain the original error during unwinding */ } }
+};
 std::atomic<bool> quitting{false};
 void interrupt(int) { quitting = true; }
 std::optional<std::string> command() {
@@ -65,6 +69,13 @@ int main(int argc, char** argv) {
         std::string remoteUser, generation, authorizing, remoteSessionVersion;
         std::set<std::string> seen;
         std::atomic<int64_t> lastRemoteKeyframe{0};
+        ScopeExit cleanup{[&] {
+            if (peer) peer->close();
+            source.reset(); // Join producer before freeing Player or callback targets.
+            signaling.stop();
+            player.reset();
+        }};
+        signaling.start(); // Also leaves/closes the room if media/device initialization fails.
         if (!host || preview) player = std::make_unique<Player>(headless);
         if (host && player) { const auto time = nowUs(); player->clock.sample(time,time,time,time); }
         if (host) source = std::make_unique<MediaSource>(file, MediaOptions{1920,1080,hardware,2500000}, [&](EncodedFrame frame) {
@@ -89,7 +100,6 @@ int main(int argc, char** argv) {
                 }
             });
         };
-        signaling.start();
         std::signal(SIGINT, interrupt); std::signal(SIGTERM, interrupt);
         std::cout << (host ? "Commands: play, pause, seek SECONDS, stop, stats, quit\n" : "Commands: stats, quit\n");
         int64_t peerStarted = 0, disconnectedSince = 0, lastState = 0, lastPing = 0, lastStats = 0;
