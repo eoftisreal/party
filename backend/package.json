@@ -1,16 +1,16 @@
 {
   "name": "party-room-api",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "engines": {
     "node": ">=22"
   },
   "scripts": {
-    "test": "node --test",
-    "check": "node --check src/main.js && node --check src/rooms.js && node --check src/store.js && node --check src/http.js"
+    "test": "node --test test/*.test.js",
+    "check": "node --check src/main.js && node --check src/rooms.js && node --check src/signaling.js && node --check src/store.js && node --check src/http.js"
   },
   "dependencies": {
-    "node-appwrite": "^23.1.0"
+    "node-appwrite": "23.1.0"
   }
 }

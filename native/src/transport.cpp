@@ -1,0 +1,213 @@
+#include "party/transport.hpp"
+#include <algorithm>
+#include <iostream>
+#include <stdexcept>
+namespace party {
+void BoundedPacer::outgoing(rtc::message_vector& messages, const rtc::message_callback& send) {
+    std::lock_guard lock(mutex_); send_ = send;
+    rtc::message_vector controls;
+    size_t batchBytes = 0;
+    for (const auto& m : messages) if (m->type != rtc::Message::Control) batchBytes += m->size();
+    // Reserve for a whole access unit: dropping its first fragments creates a corrupt frame.
+    // 512KiB is a hard bound; VBV in the encoder limits IDR bursts below this.
+    constexpr size_t budget = 512*1024;
+    if (bytes_ + batchBytes > budget) {
+        dropped += queue_.size(); queue_.clear(); bytes_ = 0; keyframe_ = true;
+    }
+    for (auto& m : messages) {
+        if (m->type == rtc::Message::Control) { controls.push_back(m); continue; }
+        if (batchBytes > budget) { ++dropped; keyframe_ = true; continue; }
+        bytes_ += m->size(); queue_.push_back(m);
+    }
+    messages.swap(controls);
+}
+void BoundedPacer::pump(int64_t now) {
+    std::deque<rtc::message_ptr> ready;
+    rtc::message_callback send;
+    {
+        std::lock_guard lock(mutex_);
+        if (!last_) last_ = now;
+        tokens_ = std::min(4800.0, tokens_ + std::max<int64_t>(0, now - last_) * (rate_.load() * 1.15 / 8.0) / 1000000.0);
+        last_ = now;
+        while (!queue_.empty() && double(queue_.front()->size()) <= tokens_) {
+            auto m = queue_.front(); queue_.pop_front(); bytes_ -= m->size(); tokens_ -= double(m->size()); ready.push_back(m);
+        }
+        send = send_;
+    }
+    if (send) for (auto& m : ready) { bytesSent += m->size(); send(m); }
+}
+int64_t BoundedPacer::queueUs() const { std::lock_guard lock(mutex_); return int64_t(bytes_) * 8 * 1000000 / rate_.load(); }
+std::shared_ptr<Peer> Peer::create(bool host, const rtc::Configuration& config, FrameCallback frame, std::function<void(Json)> control) {
+    auto p = std::shared_ptr<Peer>(new Peer(host)); p->init(config, std::move(frame), std::move(control)); return p;
+}
+void Peer::init(const rtc::Configuration& config, FrameCallback frame, std::function<void(Json)> control) {
+    onControl_ = std::move(control);
+    pc_ = std::make_shared<rtc::PeerConnection>(config);
+    const auto weak = weak_from_this();
+    pc_->onStateChange([weak](auto state) { if (auto self = weak.lock()) self->state_ = state; });
+    pc_->onLocalDescription([weak](const rtc::Description& d) { if (auto self = weak.lock()) {
+        std::lock_guard lock(self->mutex_); self->outbound_.push_back({{"type", d.typeString()}, {"payload", {{"sdp", std::string(d)}}}});
+    }});
+    pc_->onLocalCandidate([weak](const rtc::Candidate& c) { if (auto self = weak.lock()) {
+        std::lock_guard lock(self->mutex_);
+        if (self->outbound_.size() < 128) self->outbound_.push_back({{"type", "candidate"}, {"payload", {{"candidate", std::string(c)}, {"mid", c.mid()}}}});
+    }});
+    if (host_) {
+        auto v = rtc::Description::Video("video", rtc::Description::Direction::SendOnly);
+        v.addH264Codec(96, "profile-level-id=42e028;packetization-mode=1;level-asymmetry-allowed=1");
+        v.addSSRC(1, "party", "party", "video");
+        v.addAttribute("rtcp-fb:96 nack"); v.addAttribute("rtcp-fb:96 nack pli"); v.addAttribute("rtcp-fb:96 goog-remb");
+        video_ = pc_->addTrack(v);
+        auto cfg = std::make_shared<rtc::RtpPacketizationConfig>(1, "party", 96, 90000);
+        auto packetizer = std::make_shared<rtc::H264RtpPacketizer>(rtc::NalUnit::Separator::StartSequence, cfg, 1100);
+        packetizer->addToChain(std::make_shared<rtc::RtcpSrReporter>(cfg));
+        packetizer->addToChain(std::make_shared<rtc::RtcpNackResponder>(1024));
+        packetizer->addToChain(std::make_shared<rtc::PliHandler>([weak] { if (auto self = weak.lock()) self->forceKeyframe = true; }));
+        packetizer->addToChain(std::make_shared<rtc::RembHandler>([weak](unsigned bitrate) { if (auto self = weak.lock()) self->targetBitrate = std::clamp(bitrate, 300000u, 5000000u); }));
+        pacer_ = std::make_shared<BoundedPacer>(targetBitrate, forceKeyframe);
+        packetizer->addToChain(pacer_);
+        auto vg = std::make_shared<PacketGuard>(); vg->addToChain(packetizer); video_->setMediaHandler(vg);
+        auto a = rtc::Description::Audio("audio", rtc::Description::Direction::SendOnly);
+        a.addOpusCodec(111); a.addSSRC(2, "party", "party", "audio");
+        a.addAttribute("rtcp-fb:111 nack"); audio_ = pc_->addTrack(a);
+        auto acfg = std::make_shared<rtc::RtpPacketizationConfig>(2, "party", 111, 48000);
+        auto ap = std::make_shared<rtc::OpusRtpPacketizer>(acfg);
+        ap->addToChain(std::make_shared<rtc::RtcpSrReporter>(acfg));
+        ap->addToChain(std::make_shared<rtc::RtcpNackResponder>(128));
+        auto ag = std::make_shared<PacketGuard>(); ag->addToChain(ap); audio_->setMediaHandler(ag);
+        setupChannel(pc_->createDataChannel("party-control"));
+    } else {
+        pc_->onTrack([weak, frame](auto track) { if (auto self = weak.lock()) self->receiverTrack(track, frame); });
+        pc_->onDataChannel([weak](auto dc) { if (auto self = weak.lock()) {
+            if (dc->label() != "party-control") { dc->close(); return; }
+            self->setupChannel(dc);
+        }});
+    }
+}
+void Peer::setupChannel(std::shared_ptr<rtc::DataChannel> dc) {
+    { std::lock_guard lock(mutex_); dc_ = dc; }
+    const auto weak = weak_from_this();
+    dc->onMessage(nullptr, [weak](std::string message) { if (auto self = weak.lock()) {
+        if (message.size() > 8192) return;
+        try { const auto j = Json::parse(message); if (j.is_object() && j.contains("type")) self->onControl_(j); }
+        catch (const std::exception&) { /* malformed peer control is rejected */ }
+    }});
+}
+void Peer::receiverTrack(std::shared_ptr<rtc::Track> track, FrameCallback frame) {
+    const bool video = track->description().type() == "video";
+    if (track->direction() != rtc::Description::Direction::RecvOnly || (!video && track->description().type() != "audio")) { track->close(); return; }
+    const auto weak = weak_from_this();
+    auto receiver = std::make_shared<RtpReceiver>(video, std::move(frame), [weak] {
+        if (auto self = weak.lock()) {
+            // Called from pump on the application thread; rate-limit PLI.
+            if (nowUs() - self->lastPli_ > 250000) {
+                self->lastPli_ = nowUs();
+                std::shared_ptr<rtc::Track> video; { std::lock_guard lock(self->mutex_); video = self->video_; }
+                if (video) video->requestKeyframe();
+            }
+        }
+    });
+    auto guard = std::make_shared<PacketGuard>();
+    guard->addToChain(std::make_shared<rtc::RtcpReceivingSession>()); guard->addToChain(receiver);
+    track->setMediaHandler(guard);
+    std::lock_guard lock(mutex_);
+    if (video) { if (video_) { track->close(); return; } video_ = track; videoReceiver_ = receiver; }
+    else { if (audio_) { track->close(); return; } audio_ = track; audioReceiver_ = receiver; }
+}
+void Peer::offer() { if (!host_) throw std::logic_error("Only host can offer"); pc_->setLocalDescription(rtc::Description::Type::Offer); }
+void Peer::signal(const Json& message) {
+    const auto type = message.at("type").get<std::string>(); const auto& payload = message.at("payload");
+    if (type == "candidate") {
+        if (!pc_->remoteDescription()) {
+            if (earlyCandidates_.size() >= 128) throw std::runtime_error("Too many early ICE candidates");
+            earlyCandidates_.push_back(payload); return;
+        }
+        pc_->addRemoteCandidate(rtc::Candidate(payload.at("candidate").get<std::string>(), payload.at("mid").get<std::string>()));
+    } else if ((type == "offer" && !host_) || (type == "answer" && host_)) {
+        if (payload.at("sdp").get_ref<const std::string&>().size() > 60000) throw std::runtime_error("SDP too large");
+        pc_->setRemoteDescription(rtc::Description(payload.at("sdp").get<std::string>(), type));
+        for (const auto& c : earlyCandidates_) pc_->addRemoteCandidate(rtc::Candidate(c.at("candidate").get<std::string>(), c.at("mid").get<std::string>()));
+        earlyCandidates_.clear();
+        if (!host_) pc_->setLocalDescription(rtc::Description::Type::Answer);
+    } else if (type == "disconnect") close();
+    else throw std::invalid_argument("Unauthorized signal direction");
+}
+std::vector<Json> Peer::takeSignals() {
+    std::lock_guard lock(mutex_); std::vector<Json> result(outbound_.begin(), outbound_.end()); outbound_.clear();
+    std::stable_sort(result.begin(), result.end(), [](const auto& a, const auto& b) { return (a.at("type") == "candidate") < (b.at("type") == "candidate"); });
+    return result;
+}
+void Peer::send(const EncodedFrame& frame) {
+    if (!host_ || !connected()) return;
+    const uint32_t rate = frame.video ? 90000 : 48000;
+    const uint32_t timestamp = uint32_t((frame.transportUs / 1000000) * rate + (frame.transportUs % 1000000) * rate / 1000000);
+    const auto track = frame.video ? video_ : audio_;
+    try {
+        if (track && track->isOpen()) track->sendFrame(reinterpret_cast<const std::byte*>(frame.data.data()), frame.data.size(), rtc::FrameInfo(timestamp));
+    } catch (const std::exception&) { ++sendFailures; state_ = rtc::PeerConnection::State::Failed; }
+}
+bool Peer::control(const Json& message) {
+    std::shared_ptr<rtc::DataChannel> dc; { std::lock_guard lock(mutex_); dc = dc_; }
+    if (!dc || !dc->isOpen() || dc->bufferedAmount() > 65536) return false;
+    try { return dc->send(message.dump()); } catch (const std::exception&) { ++sendFailures; return false; }
+}
+void Peer::pump() {
+    if (closed_) return;
+    if (pacer_) pacer_->pump(nowUs());
+    std::shared_ptr<RtpReceiver> v, a; std::shared_ptr<rtc::Track> vt;
+    { std::lock_guard lock(mutex_); v = videoReceiver_; a = audioReceiver_; vt = video_; }
+    if (v) { v->setAnchor(hostAnchorUs); v->pump(nowUs()); }
+    if (a) { a->setAnchor(hostAnchorUs); a->pump(nowUs()); }
+    if (v && vt && connected() && nowUs() - lastFeedback_ >= 2000000) {
+        const auto received = v->stats->received.load(), lost = v->stats->lost.load();
+        const auto n = received - previousReceived_, l = lost - previousLost_;
+        const double loss = n+l ? double(l)/double(n+l) : 0;
+        vt->requestBitrate(controller_.update(loss, v->stats->jitterUs.load(), 0));
+        previousReceived_ = received; previousLost_ = lost; lastFeedback_ = nowUs();
+    }
+}
+bool Peer::connected() const { return state_ == rtc::PeerConnection::State::Connected; }
+bool Peer::failed() const { const auto state = state_.load(); return state == rtc::PeerConnection::State::Failed || state == rtc::PeerConnection::State::Disconnected || state == rtc::PeerConnection::State::Closed; }
+Json Peer::stats() const {
+    Json result{{"iceState", int(pc_->iceState())}, {"sendFailures", sendFailures.load()}, {"connectionState", int(state_.load())}, {"connected", connected()}, {"targetBitrate", targetBitrate.load()}, {"dataBytesSent", pc_->bytesSent()}, {"dataBytesReceived", pc_->bytesReceived()}};
+    if (const auto rtt = pc_->rtt()) result["sctpRttMs"] = rtt->count();
+    rtc::Candidate local, remote;
+    if (pc_->getSelectedCandidatePair(&local, &remote)) result["candidateTypes"] = {int(local.type()), int(remote.type())};
+    std::lock_guard lock(mutex_);
+    if (videoReceiver_) result["video"] = videoReceiver_->stats->json();
+    if (audioReceiver_) result["audio"] = audioReceiver_->stats->json();
+    if (pacer_) { result["rtpVideoBytesSent"] = pacer_->bytesSent.load(); result["pacerQueueUs"] = pacer_->queueUs(); result["pacerDroppedPackets"] = pacer_->dropped.load(); }
+    return result;
+}
+void Peer::close() {
+    if (closed_.exchange(true)) return;
+    std::shared_ptr<rtc::DataChannel> dc; { std::lock_guard lock(mutex_); dc = dc_; }
+    if (dc) dc->resetCallbacks();
+    pc_->resetCallbacks(); pc_->close();
+}
+Peer::~Peer() { close(); }
+rtc::Configuration iceConfigFromEnvironment() {
+    rtc::Configuration cfg; cfg.disableAutoNegotiation = true;
+    cfg.mtu = 1200; cfg.maxMessageSize = 16384;
+    if (const auto raw = env("PARTY_ICE_SERVERS"); !raw.empty()) {
+        const auto servers = Json::parse(raw);
+        if (!servers.is_array() || servers.size() > 8) throw std::invalid_argument("Invalid ICE server configuration");
+        unsigned turns = 0, stuns = 0;
+        for (const auto& s : servers) {
+            rtc::IceServer server(s.at("url").get<std::string>());
+            if (server.type == rtc::IceServer::Type::Turn) {
+                if (server.relayType != rtc::IceServer::RelayType::TurnUdp || ++turns > 2) throw std::invalid_argument("Default libjuice build supports up to two UDP TURN servers");
+                server.username = s.at("username").get<std::string>(); server.password = s.at("credential").get<std::string>();
+                if (server.username.empty() || server.password.empty()) throw std::invalid_argument("TURN credentials required");
+            }
+            if (server.type == rtc::IceServer::Type::Stun && ++stuns > 1) throw std::invalid_argument("Default libjuice build supports one STUN server");
+            cfg.iceServers.push_back(server);
+        }
+    }
+    if (env("PARTY_RELAY_ONLY") == "1") {
+        if (std::none_of(cfg.iceServers.begin(), cfg.iceServers.end(), [](const auto& s) { return s.type == rtc::IceServer::Type::Turn; })) throw std::invalid_argument("Relay-only mode needs a TURN server");
+        cfg.iceTransportPolicy = rtc::TransportPolicy::Relay;
+    }
+    return cfg;
+}
+}
