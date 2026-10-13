@@ -108,7 +108,9 @@ int main(){using namespace party;try{
             if(++authorizations==1)throw std::runtime_error("Lost authorization response");
             return {{"generation",id('a')},{"viewerId","viewer"}};
         }
-        if(path.ends_with("/signals"))return {{"messages",Json::array()}};return hostRoom;
+        if(path.ends_with("/signals"))return {{"messages",Json::array()}};
+        if(authorizations==2 && !path.ends_with("/heartbeat") && !path.ends_with("/leave"))std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        return hostRoom;
     },hostRoom,true,{20000,20000,2000000,4000000});
     retry.authorize("viewer",true);retry.start();until(retry,[&](const Json& e){
         if(e.at("event")!="authorized")return false;
