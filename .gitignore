@@ -1,5 +1,10 @@
-node_modules/
+build*/
+backend/node_modules/
 .env
-.env.*
-!.env.example
-coverage/
+*.mp4
+*.mkv
+*.wav
+*.h264
+*.opus
+CMakeUserPresets.json
+vcpkg_installed/

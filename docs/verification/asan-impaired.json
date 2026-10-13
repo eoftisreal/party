@@ -1,0 +1,94 @@
+{
+  "stream": {
+    "durationUs": 17015170,
+    "host": {
+      "candidateTypes": [
+        1,
+        3
+      ],
+      "connected": true,
+      "connectionState": 2,
+      "dataBytesReceived": 2843,
+      "dataBytesSent": 12979,
+      "iceState": 3,
+      "pacerDroppedPackets": 0,
+      "pacerQueueUs": 0,
+      "rtpVideoBytesSent": 1188021,
+      "sctpRttMs": 14,
+      "sendFailures": 0,
+      "targetBitrate": 2500000
+    },
+    "impaired": true,
+    "injectedDrops": 16,
+    "injectedReordering": 52,
+    "player": {
+      "audioEnergy": 4605.054191938964,
+      "audioQueuedBytes": 0,
+      "avDriftUs": 16722,
+      "buffering": true,
+      "clockOffsetUs": 22,
+      "clockRttUs": 338,
+      "concealedSamples": 0,
+      "decodeErrors": 0,
+      "decodedAudioPackets": 619,
+      "decodedVideoFrames": 361,
+      "droppedVideoFrames": 0,
+      "epoch": 7,
+      "maxAvDriftUs": 33352,
+      "movieUs": 0,
+      "rebufferings": 0,
+      "renderedVideoFrames": 319,
+      "videoChecksum": 15494715635502294518
+    },
+    "source": {
+      "audioPackets": 620,
+      "bitrate": 2500000,
+      "encodedBytes": 3997462,
+      "encoder": "libx264",
+      "height": 1080,
+      "videoFrames": 368,
+      "width": 1920
+    },
+    "test": "real-loopback",
+    "viewer": {
+      "audio": {
+        "duplicates": 0,
+        "frames": 192,
+        "jitterUs": 225,
+        "lost": 0,
+        "malformed": 0,
+        "nacks": 0,
+        "rtpPackets": 192
+      },
+      "candidateTypes": [
+        1,
+        1
+      ],
+      "connected": true,
+      "connectionState": 2,
+      "dataBytesReceived": 12979,
+      "dataBytesSent": 2843,
+      "iceState": 3,
+      "sctpRttMs": 1,
+      "sendFailures": 0,
+      "targetBitrate": 2500000,
+      "video": {
+        "duplicates": 1,
+        "frames": 113,
+        "jitterUs": 2128,
+        "lost": 0,
+        "malformed": 0,
+        "nacks": 51,
+        "rtpPackets": 1590
+      }
+    }
+  },
+  "resources": {
+    "wallSeconds": 17.164,
+    "exitCode": 0,
+    "viewerWorkingDirectoryFiles": [],
+    "userCpuSeconds": 8.998,
+    "systemCpuSeconds": 0.915,
+    "peakRssKiB": 584496
+  }
+}

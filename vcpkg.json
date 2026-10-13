@@ -1,0 +1,39 @@
+{
+  "name": "party",
+  "version-string": "0.2.0",
+  "builtin-baseline": "ef7dbf94b9198bc58f45951adcf1f041fcbc5ea0",
+  "dependencies": [
+    "nlohmann-json",
+    "sdl2",
+    "openssl",
+    "curl",
+    {
+      "name": "ffmpeg",
+      "default-features": false,
+      "features": [
+        "avcodec",
+        "avformat",
+        "swresample",
+        "swscale",
+        "x264",
+        "opus",
+        "ffmpeg"
+      ]
+    }
+  ],
+  "features": {
+    "hardware": {
+      "description": "Compile NVENC, QSV and AMF encoder support (requires vendor drivers at runtime)",
+      "dependencies": [
+        {
+          "name": "ffmpeg",
+          "features": [
+            "nvcodec",
+            "qsv",
+            "amf"
+          ]
+        }
+      ]
+    }
+  }
+}

@@ -1,18 +1,130 @@
 import { randomBytes, createHash, timingSafeEqual } from 'node:crypto';
-export class ApiError extends Error { constructor(status,code,message){super(message);this.status=status;this.code=code;} }
-const digest=s=>createHash('sha256').update(s).digest('hex');
-const memberId=(room,user)=>digest(room+':'+user).slice(0,32);
-const roomPattern=/^[a-f0-9]{32}$/;
-function safe(room,members,user){return {roomId:room.$id,title:room.title,hostId:room.hostId,status:room.status,expiresAt:room.expiresAt,participants:members.map(m=>({userId:m.userId,joinedAt:m.joinedAt})),yourRole:room.hostId===user?'host':'viewer'};}
-export function makeRoomsService(store,{now=()=>Date.now(),random=randomBytes}={}){
- async function get(id){if(!roomPattern.test(id||''))throw new ApiError(400,'INVALID_ROOM_ID','Invalid room identifier');const room=await store.getRoom(id);if(!room)throw new ApiError(404,'ROOM_NOT_FOUND','Room not found');return room;}
- function active(r){if(r.status!=='open'||Date.parse(r.expiresAt)<=now())throw new ApiError(410,'ROOM_CLOSED','Room closed or expired');}
- async function member(id,user){const r=await get(id);if(!await store.getMember(memberId(id,user)))throw new ApiError(403,'NOT_A_MEMBER','Not a room member');return r;}
- return {
- async create(user,input={}){const title=input.title===undefined?'Watch party':input.title;if(typeof title!=='string'||!title.trim()||title.trim().length>80)throw new ApiError(400,'INVALID_TITLE','Title must be 1 to 80 characters');const id=random(16).toString('hex'),inviteCode=random(24).toString('base64url');const room=await store.createRoom(id,{hostId:user,title:title.trim(),inviteHash:digest(inviteCode),status:'open',expiresAt:new Date(now()+86400000).toISOString()});const m={roomId:id,userId:user,joinedAt:new Date(now()).toISOString()};try{await store.createMember(memberId(id,user),m);}catch(e){try{await store.deleteRoom(id);}catch{}throw e;}return {...safe(room,[m],user),inviteCode};},
- async join(id,user,invite){const r=await get(id);active(r);const mid=memberId(id,user);if(!await store.getMember(mid)){if(typeof invite!=='string'||!/^[A-Za-z0-9_-]{32}$/.test(invite))throw new ApiError(403,'INVALID_INVITE','Invite code required');const a=Buffer.from(digest(invite),'hex'),b=Buffer.from(r.inviteHash,'hex');if(a.length!==b.length||!timingSafeEqual(a,b))throw new ApiError(403,'INVALID_INVITE','Invalid invite');try{await store.createMember(mid,{roomId:id,userId:user,joinedAt:new Date(now()).toISOString()});}catch(e){if(e.code!==409)throw e;}}return safe(r,await store.listMembers(id),user);},
- async read(id,user){const r=await member(id,user);active(r);return safe(r,await store.listMembers(id),user);},
- async leave(id,user){const r=await member(id,user);if(r.hostId===user){if(r.status==='open')await store.updateRoom(id,{status:'closed'});return {left:true,roomClosed:true};}await store.deleteMember(memberId(id,user));return {left:true,roomClosed:false};},
- async close(id,user){const r=await member(id,user);if(r.hostId!==user)throw new ApiError(403,'HOST_ONLY','Only host can close');if(r.status!=='closed')await store.updateRoom(id,{status:'closed'});return {closed:true};}
- };
+export class ApiError extends Error {
+  constructor(status, code, message) { super(message); this.status = status; this.code = code; }
+}
+export const digest = s => createHash('sha256').update(s).digest('hex');
+export const memberId = (room, user) => digest(`${room}:${user}`).slice(0, 32);
+export const peerId = (room, user) => digest(`peer:${room}:${user}`).slice(0, 32);
+export const idPattern = /^[a-f0-9]{32}$/;
+export function fail(status, code, message) { throw new ApiError(status, code, message); }
+export function makeRoomsService(store, { now = () => Date.now(), random = randomBytes } = {}) {
+  const token = () => random(16).toString('hex');
+  const timestamp = () => new Date(now()).toISOString();
+  async function get(s, id) {
+    if (!idPattern.test(id || '')) fail(400, 'INVALID_ROOM_ID', 'Invalid room identifier');
+    const r = await s.getRoom(id);
+    if (!r) fail(404, 'ROOM_NOT_FOUND', 'Room not found');
+    return r;
+  }
+  function active(r) {
+    if (r.status !== 'open' || !Number.isFinite(Date.parse(r.expiresAt)) || Date.parse(r.expiresAt) <= now())
+      fail(410, 'ROOM_CLOSED', 'Room closed or expired');
+  }
+  async function lockRoom(s, id) {
+    const original = await get(s, id);
+    await s.updateRoom(id, { revision: (original.revision || 0) + 1 });
+    // Stage the write BEFORE authorization, then re-read the staged document.
+    // Appwrite transactions are optimistic; an unstaged preliminary read is not a lock.
+    return get(s, id);
+  }
+  async function authorize(s, id, user, session, requireSession = true) {
+    const room = s.isTransaction ? await lockRoom(s, id) : await get(s, id); active(room);
+    const m = await s.getMember(memberId(id, user));
+    if (!m) fail(403, 'NOT_A_MEMBER', 'Not a room member');
+    if (requireSession && (!idPattern.test(session || '') || session !== m.sessionId))
+      fail(403, 'STALE_SESSION', 'Join again; session was replaced');
+    if (requireSession && Date.parse(m.lastSeenAt) + 120000 <= now()) fail(403, 'PEER_EXPIRED', 'Peer lease expired; join again');
+    return { room, member: m };
+  }
+  async function touch(s, r) { await s.updateRoom(r.$id, { revision: (r.revision || 0) + 1 }); }
+  function safe(r, ms, user, session) {
+    return { roomId: r.$id, title: r.title, hostId: r.hostId, status: r.status, expiresAt: r.expiresAt,
+      participants: ms.map(m => ({ userId: m.userId, joinedAt: m.joinedAt, online: Date.parse(m.lastSeenAt) + 120000 > now(), ...(r.hostId === user ? { sessionVersion: digest(m.sessionId || '') } : {}) })),
+      yourUserId: user, yourRole: r.hostId === user ? 'host' : 'viewer', ...(session ? { sessionId: session } : {}), serverTimeMs: now() };
+  }
+  async function revoke(s, id, user) {
+    for (const p of await s.listPeers(id)) if (p.hostId === user || p.viewerId === user) await s.updatePeer(p.$id, { state: 'closed' });
+    for (const m of await s.listSignals(id)) if (m.from === user || m.to === user) await s.deleteSignal(m.$id);
+  }
+  return {
+    authorize, active, touch, token, timestamp, now,
+    async create(user, input = {}) {
+      const title = input.title ?? 'Watch party';
+      if (typeof title !== 'string' || !title.trim() || title.trim().length > 80) fail(400, 'INVALID_TITLE', 'Title must be 1 to 80 characters');
+      const id = token(), inviteCode = random(24).toString('base64url'), sessionId = token();
+      return store.atomic(async s => {
+        const r = await s.createRoom(id, { hostId: user, title: title.trim(), inviteHash: digest(inviteCode), status: 'open', revision: 0,
+          expiresAt: new Date(now() + 86400000).toISOString() });
+        const m = { roomId: id, userId: user, joinedAt: timestamp(), lastSeenAt: timestamp(), sessionId, rateWindow: 0, rateCount: 0 };
+        await s.createMember(memberId(id, user), m);
+        return { ...safe(r, [m], user, sessionId), inviteCode };
+      });
+    },
+    async join(id, user, invite) {
+      return store.atomic(async s => {
+        const r = await lockRoom(s, id); active(r);
+        const mid = memberId(id, user), existing = await s.getMember(mid);
+        if (!existing) {
+          if (typeof invite !== 'string' || !/^[A-Za-z0-9_-]{32}$/.test(invite)) fail(403, 'INVALID_INVITE', 'Invite code required');
+          const a = Buffer.from(digest(invite), 'hex'), b = Buffer.from(r.inviteHash, 'hex');
+          if (a.length !== b.length || !timingSafeEqual(a, b)) fail(403, 'INVALID_INVITE', 'Invalid invite');
+          const members = await s.listMembers(id);
+          // One host + one viewer; stale viewers are explicitly removed before admitting another.
+          for (const m of members) if (m.userId !== r.hostId && Date.parse(m.lastSeenAt) + 120000 <= now()) {
+            await revoke(s, id, m.userId); await s.deleteMember(memberId(id, m.userId));
+          }
+          if ((await s.listMembers(id)).length >= 2) fail(409, 'ROOM_FULL', 'Prototype supports one viewer');
+        } else await revoke(s, id, user);
+        const sessionId = token();
+        const m = { roomId: id, userId: user, joinedAt: existing?.joinedAt || timestamp(), lastSeenAt: timestamp(), sessionId, rateWindow: 0, rateCount: 0 };
+        if (existing) await s.updateMember(mid, m); else await s.createMember(mid, m);
+        await touch(s, r);
+        return safe(r, await s.listMembers(id), user, sessionId);
+      });
+    },
+    async read(id, user) {
+      const { room } = await authorize(store, id, user, null, false);
+      return safe(room, await store.listMembers(id), user);
+    },
+    async heartbeat(id, user, session) {
+      return store.atomic(async s => {
+        const { room } = await authorize(s, id, user, session);
+        await s.updateMember(memberId(id, user), { lastSeenAt: timestamp() }); await touch(s, room);
+        return { ok: true, serverTimeMs: now() };
+      });
+    },
+    async leave(id, user, session) {
+      return store.atomic(async s => {
+        const { room } = await authorize(s, id, user, session);
+        await revoke(s, id, user);
+        if (room.hostId === user) await s.updateRoom(id, { status: 'closed', revision: (room.revision || 0) + 1 });
+        else { await s.deleteMember(memberId(id, user)); await touch(s, room); }
+        return { left: true, roomClosed: room.hostId === user };
+      });
+    },
+    async close(id, user, session) {
+      return store.atomic(async s => {
+        const { room } = await authorize(s, id, user, session);
+        if (room.hostId !== user) fail(403, 'HOST_ONLY', 'Only host can close');
+        await revoke(s, id, user); await s.updateRoom(id, { status: 'closed', revision: (room.revision || 0) + 1 });
+        return { closed: true };
+      });
+    },
+    async cleanup() {
+      // Scheduled invocation only, never routed through the public HTTP API.
+      for (const r of await store.listRooms()) if (r.status === 'open' && Date.parse(r.expiresAt) <= now()) {
+        await store.atomic(async s => {
+          const fresh = await get(s, r.$id);
+          await revoke(s, r.$id, fresh.hostId);
+          await s.updateRoom(r.$id, { status: 'closed', revision: (fresh.revision || 0) + 1 });
+        });
+      }
+      for (const r of await store.listRooms()) for (const m of await store.listSignals(r.$id))
+        if (Date.parse(m.expiresAt) <= now()) { try { await store.deleteSignal(m.$id); } catch (e) { if (e.code !== 404) throw e; } }
+      for (const n of await store.listNotifications()) if (Date.parse(n.expiresAt) <= now()) {
+        try { await store.deleteNotification(n.$id); } catch (e) { if (e.code !== 404) throw e; }
+      }
+      return { cleaned: true };
+    },
+  };
 }
