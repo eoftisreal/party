@@ -31,7 +31,7 @@ int main(){using namespace party;try{
     expect(rejected,"Conflicting duplicate identifier accepted");
 
     std::atomic<unsigned> polls{0},ackCalls{0};std::atomic<bool> removed{false};
-    Json room={{"roomId",id('c')},{"yourUserId","viewer"},{"hostId","host"},
+    Json room={{"roomId",id('c')},{"sessionId",id('9')},{"yourUserId","viewer"},{"hostId","host"},
         {"connection",{{"generation",id('a')},{"viewerId","viewer"},{"state","offered"}}}};
     Signaling s([&](const std::string&,const std::string& path,const Json&)->Json{
         if(path.ends_with("/signals")){++polls;return {{"messages",removed?Json::array():Json::array({message('5')})}};}
@@ -63,6 +63,20 @@ int main(){using namespace party;try{
     },room,false,{20000,20000,2000000,4000000});
     expired.start();until(expired,[](const Json& e){return e.at("event")=="rejoined";});expired.stop();
     expect(joins==1,"Expired membership was not rejoined exactly once");
+    joins=0;hearts=0;Json renewalInput;bool renewalCommitted=false;
+    Signaling lostRenewal([&](const std::string&,const std::string& path,const Json& input)->Json{
+        if(path.ends_with("/heartbeat") && ++hearts==1)throw HttpError(403,"PEER_EXPIRED");
+        if(path.ends_with("/join")){
+            ++joins;
+            if(!renewalCommitted){renewalInput=input;renewalCommitted=true;throw std::runtime_error("Lost renewal response");}
+            expect(input==renewalInput,"Renewal retry changed request identifier");
+            Json next=room;next["sessionId"]=id('b');return next;
+        }
+        if(renewalCommitted && joins<2 && path.ends_with("/heartbeat"))throw HttpError(403,"STALE_SESSION");
+        if(path.ends_with("/signals"))return {{"messages",Json::array()}};return room;
+    },room,false,{20000,20000,2000000,6000000});
+    lostRenewal.start();until(lostRenewal,[](const Json& e){return e.at("event")=="rejoined";});lostRenewal.stop();
+    expect(joins==2,"Lost renewal response broke recovery");
     joins=0;
     Signaling replaced([&](const std::string&,const std::string& path,const Json&)->Json{
         if(path.ends_with("/join"))++joins;

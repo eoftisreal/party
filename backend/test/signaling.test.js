@@ -117,3 +117,23 @@ test('cleanup expires receipts and removes retained closed room dependencies',as
   f.advance(2*86400000);await f.rooms.cleanup();
   for(const name of ['Room','Member','Peer','Signal','Notification'])assert.equal(f.tables[name].size,0,name);
 });
+
+test('expired-lease retries preserve session and an established replacement generation',async()=>{
+  const f=await connected();f.advance(120001);
+  const request={previousSession:f.v.sessionId,requestId:'a'.repeat(32)};
+  const first=await f.rooms.join(f.r.roomId,'viewer',undefined,request);
+  assert.notEqual(first.sessionId,f.v.sessionId);
+  const host=await f.rooms.join(f.r.roomId,'host');
+  const peer=await f.signaling.connect(f.r.roomId,'host',host.sessionId,{viewerId:'viewer'});
+  const retry=await f.rooms.join(f.r.roomId,'viewer',undefined,request);
+  assert.equal(retry.sessionId,first.sessionId);
+  assert.equal((await f.rooms.read(f.r.roomId,'host',host.sessionId)).connection.generation,peer.generation);
+});
+test('lease recovery cannot steal a newer session or rotate an active lease',async()=>{
+  const f=await connected(),request={previousSession:f.v.sessionId,requestId:'b'.repeat(32)};
+  await assert.rejects(f.rooms.join(f.r.roomId,'viewer',undefined,request),rejects('LEASE_ACTIVE'));
+  f.advance(120001);const first=await f.rooms.join(f.r.roomId,'viewer',undefined,request);
+  const newer=await f.rooms.join(f.r.roomId,'viewer');
+  await assert.rejects(f.rooms.join(f.r.roomId,'viewer',undefined,request),rejects('STALE_SESSION'));
+  assert.notEqual(newer.sessionId,first.sessionId);
+});

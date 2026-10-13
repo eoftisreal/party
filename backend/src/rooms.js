@@ -74,11 +74,26 @@ export function makeRoomsService(store, { now = () => Date.now(), random = rando
         return { ...safe(r, [m], user, sessionId), inviteCode };
       });
     },
-    async join(id, user, invite) {
+    async join(id, user, invite, renewal = {}) {
+      const renewing=renewal.previousSession!==undefined || renewal.requestId!==undefined;
+      if(renewing && (!idPattern.test(renewal.previousSession||'') || !idPattern.test(renewal.requestId||'')))
+        fail(400,'INVALID_RENEWAL','Previous session and request identifier required');
       await limit(user,'join'); // Failed invite attempts also consume the committed budget.
       return store.atomic(async s => {
         const r = await lockRoom(s, id); active(r);
         const mid = memberId(id, user), existing = await s.getMember(mid);
+        const renewed=renewing?digest(`renew:${id}:${user}:${renewal.previousSession}:${renewal.requestId}`).slice(0,32):null;
+        if(renewing) {
+          if(!existing)fail(403,'NOT_A_MEMBER','Membership no longer exists');
+          if(existing.sessionId===renewed && Date.parse(existing.lastSeenAt)+120000>now()) {
+            await s.updateMember(mid,{lastSeenAt:timestamp()});await touch(s,r);
+            return safe(r,await s.listMembers(id),user,renewed);
+          }
+          if(existing.sessionId!==renewal.previousSession && existing.sessionId!==renewed)
+            fail(403,'STALE_SESSION','Session was replaced by another instance');
+          if(existing.sessionId===renewal.previousSession && Date.parse(existing.lastSeenAt)+120000>now())
+            fail(409,'LEASE_ACTIVE','Membership lease has not expired');
+        }
         if (!existing) {
           if (typeof invite !== 'string' || !/^[A-Za-z0-9_-]{32}$/.test(invite)) fail(403, 'INVALID_INVITE', 'Invite code required');
           const a = Buffer.from(digest(invite), 'hex'), b = Buffer.from(r.inviteHash, 'hex');
@@ -90,7 +105,7 @@ export function makeRoomsService(store, { now = () => Date.now(), random = rando
           }
           if ((await s.listMembers(id)).length >= 2) fail(409, 'ROOM_FULL', 'Prototype supports one viewer');
         } else await revoke(s, id, user);
-        const sessionId = token();
+        const sessionId = renewed || token();
         const m = { roomId: id, userId: user, joinedAt: existing?.joinedAt || timestamp(), lastSeenAt: timestamp(), sessionId, rateWindow: 0, rateCount: 0 };
         if (existing) await s.updateMember(mid, m); else await s.createMember(mid, m);
         await touch(s, r);

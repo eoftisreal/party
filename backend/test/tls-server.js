@@ -14,6 +14,8 @@ const handler=makeHandler({service:f.rooms,signaling:f.signaling,authenticate:as
   if(validJwt.has(token))return validJwt.get(token);
   throw Object.assign(Error('auth'),{code:401});
 }});
+const statuses={};
+function record(path,method,status,code=''){const action=/^[a-f0-9]{32}$/.test(path.split('/').at(-1))?'room':path.split('/').at(-1);const name=method+' '+action+' '+status+' '+code;statuses[name]=(statuses[name]||0)+1;}
 const counts={signals:0,acks:0,offers:0,answers:0,joins:0,closed:0,signalResponseDropped:0,ackResponseDropped:0,jwtRequests:0,expiredJwts:0};
 const server=https.createServer({key:fs.readFileSync(process.env.TEST_KEY),cert:fs.readFileSync(process.env.TEST_CERT)},async(req,res)=>{
   tick();const path=new URL(req.url,'https://localhost').pathname;
@@ -29,13 +31,14 @@ const server=https.createServer({key:fs.readFileSync(process.env.TEST_KEY),cert:
     if(++minted[user]>1)validJwt.set(jwt,user);else ++counts.expiredJwts;
     res.writeHead(201,{'Content-Type':'application/json'});res.end(JSON.stringify({jwt}));return;
   }
-  if(path==='/test-metrics' && req.headers.authorization===`Bearer ${process.env.TEST_HOST_TOKEN}`){res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify(counts));return;}
-  if(Date.now()<outageUntil){res.writeHead(503,{'Content-Type':'application/json'});res.end(JSON.stringify({error:{code:'SERVICE_UNAVAILABLE'}}));return;}
+  if(path==='/test-metrics' && req.headers.authorization===`Bearer ${process.env.TEST_HOST_TOKEN}`){res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({...counts,statuses,outageRemainingMs:Math.max(0,outageUntil-Date.now()),members:[...f.ms.values()].map(m=>({user:m.userId,ageMs:f.rooms.now()-Date.parse(m.lastSeenAt)}))}));return;}
+  if(Date.now()<outageUntil){record(path,req.method,503,'SERVICE_UNAVAILABLE');res.writeHead(503,{'Content-Type':'application/json'});res.end(JSON.stringify({error:{code:'SERVICE_UNAVAILABLE'}}));return;}
   let text='';for await(const chunk of req){text+=chunk;if(Buffer.byteLength(text)>65536){res.writeHead(413);res.end('{}');return;}}
   let payload={};try{payload=text?JSON.parse(text):{};}catch{}
   if(path.endsWith('/signals') && req.method==='POST'){++counts.signals;if(payload.type==='offer')++counts.offers;if(payload.type==='answer')++counts.answers;}
   if(path.endsWith('/ack'))++counts.acks;if(path.endsWith('/join'))++counts.joins;
   await handler({req:{path,method:req.method,headers:req.headers,bodyText:text},res:{json(body,status){
+    record(path,req.method,status,body.error?.code||'');
     if(status<300 && path.endsWith('/signals') && req.method==='POST' && dropSignal){dropSignal=false;++counts.signalResponseDropped;req.socket.destroy();return;}
     if(status<300 && path.endsWith('/ack') && dropAck){dropAck=false;++counts.ackResponseDropped;req.socket.destroy();return;}
     if(body.error?.code==='ROOM_CLOSED')++counts.closed;

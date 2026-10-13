@@ -11,6 +11,7 @@ Audited `main` at `10e898f8946fde57209275f36c182d11b11aab69`, the merge of PR #1
 | Restart authorization retried with a new generation | Stable requestId across retries; server returns the same generation; backend and worker regressions |
 | Delayed offers could replace current peers | Authoritative room connection snapshot and generation validation; stale inbox messages are deliberately discarded |
 | ICE could be lost before SDP | Defer ACK/application until remote SDP exists; bounded retry and per-peer candidate deduplication; actual RTC test deliberately presents ICE before SDP and repeats descriptions |
+| Lost expired-lease join responses could become terminal STALE_SESSION | Stable renewal request bound to the previous session; idempotent retry cannot steal another instance's session; backend/worker regressions |
 | Remote viewer departure could close the host's room | Distinguish REMOTE_PEER_EXPIRED from own lease/session errors; queued-authorization regression and actual viewer rejoin |
 | Network pauses overwrote desired host play state | Preserve user intent independently of actual source pause; reset replacement connection retry deadlines |
 | Closed tracks could throw from pacer/feedback pumping and terminate the host | Convert transport exceptions/closed tracks to recoverable peer failure; actual RTC test closes the media track before replacing the peer |

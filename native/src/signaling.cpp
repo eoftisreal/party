@@ -137,6 +137,8 @@ void Signaling::run(std::stop_token stop) {
     auto request=[&](const std::string& method,const std::string& path,const Json& data=Json::object()){return request_(method,base+path,data);};
     int64_t lastPoll=0,lastRoom=0,lastHeartbeat=0,lastRealtime=0,ackRetryAt=0,leaseRefresh=nowUs();
     unsigned failures=0; bool suspended=false, eventOverflow=false;
+    std::optional<Json> renewal;
+    std::string currentSession=room_.value("sessionId","");
     auto event=[&](Json value) {
         std::lock_guard lock(mutex_);
         const auto kind=value.at("event").get<std::string>();
@@ -159,8 +161,17 @@ void Signaling::run(std::stop_token stop) {
         {std::lock_guard lock(mutex_); delivery_.authorize(generation,sender,closed);}
         room["event"]="room"; event(room);
     };
+    auto renewSession=[&] {
+        const auto joinedAt=nowUs();auto room=request("POST","/join",*renewal);
+        currentSession=room.at("sessionId").get<std::string>();
+        {std::lock_guard lock(mutex_);commands_.clear();delivery_.clear();}
+        room["event"]="rejoined";event(room);suspended=false;leaseRefresh=joinedAt;
+        leaseDeadlineUs_=joinedAt+options_.leaseUs*5/6;lastRoom=lastPoll=lastHeartbeat=0;
+        renewal.reset();failures=0;
+    };
     while(!stop.stop_requested() && !eventOverflow) {
         try {
+            if(renewal){renewSession();continue;}
             const auto now=nowUs();
             // Realtime is optional. Its connection errors must never block the authoritative HTTP path.
             if(api_ && (!realtime_ || realtime_->isClosed()) && now-lastRealtime>10000000) {
@@ -208,12 +219,8 @@ void Signaling::run(std::stop_token stop) {
             failures=0;
         } catch(const HttpError& e) {
             if(e.code=="PEER_EXPIRED") {
-                try {
-                    const auto joinedAt=nowUs();auto room=request("POST","/join");
-                    {std::lock_guard lock(mutex_);commands_.clear();delivery_.clear();}
-                    room["event"]="rejoined";event(room);suspended=false;leaseRefresh=joinedAt;leaseDeadlineUs_=joinedAt+options_.leaseUs*5/6;lastRoom=lastPoll=lastHeartbeat=0;
-                    continue;
-                } catch(const std::exception&) {++failures;}
+                if(!renewal)renewal={{"previousSession",currentSession},{"requestId",randomId()}};
+                ++failures; // Retry own renewal before sending the old session header again.
             } else if(e.status==401 || e.status==403 || e.status==404 || e.status==410) {
                 // In particular, STALE_SESSION is terminal: never fight another instance by rejoining.
                 event({{"event","closed"},{"code",e.code}});break;

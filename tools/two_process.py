@@ -140,9 +140,16 @@ with tempfile.TemporaryDirectory(prefix='party-processes-') as temporary:
         assert counts.get('signalResponseDropped')==1 and counts.get('ackResponseDropped')==1,'Lost-response scenarios not exercised'
         assert counts['jwtRequests']>=5 and counts['expiredJwts']==2,'JWT 401 renewal not exercised'
         report['fixtureCounters']=counts;report['passed']=True
-    except Exception:
+    except Exception as error:
+        report['passed']=False;report['failure']=str(error)
+        try:
+            request=urllib.request.Request(f'https://127.0.0.1:{port}/test-metrics',headers={'Authorization':'Bearer '+hostToken})
+            with urllib.request.urlopen(request,context=ssl.create_default_context(cafile=str(cert)),timeout=5) as response:report['fixtureCounters']=json.load(response)
+            print('Failure coordination counters:',json.dumps(report['fixtureCounters']),flush=True)
+        except Exception:pass
+        if args.report:pathlib.Path(args.report).write_text(json.dumps(report,indent=2)+'\n')
         for index,app in enumerate(apps):
-            print('Process',index,'exit',app.process.poll(),'recent errors:',app.errors[-12:],'statistics:',app.stats,flush=True)
+            print('Process',index,'exit',app.process.poll(),'recent errors:',[e for e in app.errors if e.startswith(('Room','Party','Signaling'))][-12:],'statistics:',app.stats[-4:],flush=True)
         raise
     finally:
         for app in reversed(apps):app.finish()

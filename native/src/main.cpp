@@ -222,7 +222,7 @@ int runParty(int argc, char** argv) {
                 } else if (*line == "stats") lastStats = 0;
             }
             if (nowUs()-lastStats > 5000000) {
-                Json stats; if (peer) {stats["network"] = peer->stats();stats["connectionGeneration"]=generation;} if (source) stats["media"] = source->stats(); if (player) stats["player"] = player->stats();
+                Json stats;stats["coordinationHealthy"]=signaling.leaseHealthy();stats["coordinationActive"]=coordinationActive;stats["authorizing"]=!authorizing.empty(); if (peer) {stats["network"] = peer->stats();stats["connectionGeneration"]=generation;} if (source) stats["media"] = source->stats(); if (player) stats["player"] = player->stats();
                 std::cout << stats.dump() << '\n'; lastStats = nowUs();
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
