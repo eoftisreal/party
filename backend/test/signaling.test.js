@@ -95,10 +95,21 @@ test('restart authorization response loss does not rotate the connection twice',
   assert.equal(first.generation,retry.generation);
   assert.equal((await f.rooms.read(f.r.roomId,'host',f.r.sessionId)).connection.generation,first.generation);
 });
-test('persisted creation and failed invite budgets reject API abuse',async()=>{
-  const f=fixture();for(let i=0;i<4;++i)await f.rooms.create('host');
+test('development hosting has no per-user creation cap and no create counter writes',async()=>{
+  const f=fixture();
+  for(let i=0;i<12;++i)await f.rooms.create('host');
+  assert.equal(f.rs.size,12);
+  assert.equal(f.tables.Limit.size,0);
+});
+test('optional production creation cap persists and resets each hour',async()=>{
+  const f=fixture({createLimitPerHour:4});
+  for(let i=0;i<4;++i)await f.rooms.create('host');
   await assert.rejects(f.rooms.create('host'),rejects('RATE_LIMIT'));
-  f.advance(3600000);const r=await f.rooms.create('host');
+  f.advance(3600000);
+  assert.ok((await f.rooms.create('host')).roomId);
+});
+test('failed invitation attempts still have a persisted per-user budget',async()=>{
+  const f=fixture(),r=await f.rooms.create('host');
   for(let i=0;i<30;++i)await assert.rejects(f.rooms.join(r.roomId,'attacker','x'.repeat(32)),rejects('INVALID_INVITE'));
   await assert.rejects(f.rooms.join(r.roomId,'attacker',r.inviteCode),rejects('RATE_LIMIT'));
 });
