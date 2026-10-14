@@ -5,8 +5,19 @@ const base=process.env.PARTY_FUNCTION_URL,host=process.env.PARTY_HOST_JWT,viewer
 if(!base?.startsWith('https://')||!host||!viewer)throw Error('Need HTTPS PARTY_FUNCTION_URL, PARTY_HOST_JWT and PARTY_VIEWER_JWT');
 const id=()=>randomBytes(16).toString('hex');
 async function call(token,method,path,body,session){
-  const response=await fetch(base+path,{method,redirect:'error',signal:AbortSignal.timeout(15000),headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json',...(session?{'X-Party-Session':session}:{})},...(body?{body:JSON.stringify(body)}:{})});
-  return {status:response.status,body:await response.json()};
+  // Never log credentials, invitation codes, room identifiers, or request/response bodies.
+  const route=path.replace(/^\/v1\/rooms\/[a-f0-9]{32}(?=\/|$)/,'/v1/rooms/:room');
+  const start=Date.now();
+  console.log(`[smoke] START ${method} ${route}`);
+  try {
+    const response=await fetch(base+path,{method,redirect:'error',signal:AbortSignal.timeout(15000),headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json',...(session?{'X-Party-Session':session}:{})},...(body?{body:JSON.stringify(body)}:{})});
+    console.log(`[smoke] HTTP ${response.status} ${method} ${route} in ${Date.now()-start}ms`);
+    return {status:response.status,body:await response.json()};
+  } catch (error) {
+    const kind=error?.name==='TimeoutError'||error?.name==='AbortError'?'TIMEOUT':error?.name==='SyntaxError'?'INVALID_JSON':'REQUEST_FAILED';
+    console.error(`[smoke] ${kind} ${method} ${route} after ${Date.now()-start}ms`);
+    throw error;
+  }
 }
 // Syntactically valid negotiation data exercises permissions and ordering only.
 // This smoke does not establish DTLS/ICE, and these test fingerprints represent no media peer.
