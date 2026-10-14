@@ -60,12 +60,13 @@ struct Player::Impl {
     bool haveState = false, buffering = true, waitingVideoKeyframe = true;
     std::atomic<bool> requestKeyframe{true};
     int64_t audioEndUs = 0, lastAudioPacketUs = 0, lastMediaUs = 0;
-    uint64_t decodedVideo = 0, decodedAudio = 0, renderedVideo = 0, droppedVideo = 0, rebufferings = 0, decodeErrors = 0, concealedSamples = 0;
+    uint64_t decodedVideo = 0, decodedAudio = 0, renderedVideo = 0, droppedVideo = 0, droppedAudio = 0, rebufferings = 0, decodeErrors = 0, concealedSamples = 0;
     int64_t avDriftUs = 0, maxAvDriftUs = 0;
     uint64_t videoChecksum = 0;
     double decodedAudioEnergy = 0;
     static constexpr int64_t bufferUs = 350000;
     Impl(Player& player, bool hidden) : owner(player), headless(hidden) {
+        SDL_SetMainReady(); // Custom main / SDL_MAIN_HANDLED, including MSVC console applications.
         if (SDL_Init(SDL_INIT_AUDIO | (hidden ? 0 : SDL_INIT_VIDEO)) != 0) throw std::runtime_error(SDL_GetError());
         SDL_AudioSpec desired{}; desired.freq = 48000; desired.format = AUDIO_F32SYS; desired.channels = 2; desired.samples = 960;
         device = SDL_OpenAudioDevice(nullptr, 0, &desired, nullptr, 0);
@@ -137,7 +138,7 @@ struct Player::Impl {
                 const int count = swr_convert(swr, &dest, capacity, const_cast<const uint8_t**>(output->extended_data), output->nb_samples);
                 require(count, "Receive audio resampling failed"); pcm.resize(size_t(count)*2);
                 for (const auto sample : pcm) if (std::isfinite(sample)) decodedAudioEnergy += double(sample)*sample;
-                if (audios.size() >= 50) { audios.pop_front(); ++rebufferings; }
+                if (audios.size() >= 50) { audios.pop_front(); ++droppedAudio; }
                 audios.push_back({std::move(pcm), pts}); ++decodedAudio;
             }
             lastMediaUs = nowUs(); av_frame_unref(output.get());
@@ -183,7 +184,7 @@ struct Player::Impl {
                     const auto next = PlaybackState::parse(j);
                     if (haveState && next.epoch < state.epoch) continue;
                     if (!haveState || next.epoch != state.epoch) flush();
-                    state = next; haveState = true; owner.hostAnchorUs = next.hostNowUs;
+                    state = next; haveState = true; owner.hostAnchorUs = next.hostNowUs; owner.cutoffUs=next.cutoffUs;
                 }
             } catch (const std::exception&) { /* malformed control cannot alter playback */ }
         }
@@ -192,9 +193,18 @@ struct Player::Impl {
         if (!haveState || !state.playing || !owner.clock.ready()) { SDL_ClearQueuedAudio(device); return true; }
         const auto now = nowUs();
         if (lastMediaUs && now-lastMediaUs > 1000000) { if (!buffering) ++rebufferings; buffering = true; requestKeyframe = true; }
+        const auto ideal=now+owner.clock.offsetUs()-bufferUs;
+        if(!buffering && audioEndUs && std::abs(audioClock()-ideal)>250000) {
+            SDL_ClearQueuedAudio(device);audioEndUs=0;buffering=true;++rebufferings;
+        }
         if (SDL_GetQueuedAudioSize(device) == 0 && !audios.empty()) {
             if (!buffering && audioEndUs) { ++rebufferings; buffering = true; }
             if (buffering && audios.size() >= 4 && !videos.empty()) {
+                // Start at the live playout target, not an old audio packet retained while
+                // waiting for the first IDR/clock. Otherwise the 15-frame video queue
+                // permanently evicts video before a lagging audio master reaches it.
+                while(audios.size()>4 && audios[1].pts<=ideal){audios.pop_front();++droppedAudio;}
+                while(videos.size()>1 && videos[1].pts<audios.front().pts-60000){videos.pop_front();++droppedVideo;}
                 const auto target = owner.clock.localTime(audios.front().pts) + bufferUs;
                 if (now >= target) { buffering = false; audioEndUs = 0; }
             }
@@ -254,14 +264,17 @@ Json Player::ping() {
 }
 void Player::reset() {
     { std::lock_guard lock(impl_->mutex); impl_->incoming.clear(); impl_->controls.clear(); impl_->outstandingPings.clear(); impl_->incomingBytes = 0; }
-    impl_->flush(); impl_->haveState = false; hostAnchorUs = 0;
+    impl_->flush(); impl_->haveState = false; hostAnchorUs = 0; cutoffUs=0; clock.reset();
 }
 bool Player::tick() { return impl_->tick(); }
 bool Player::needsKeyframe() { return impl_->requestKeyframe.exchange(false); }
 Json Player::stats() const {
     return {{"decodedVideoFrames", impl_->decodedVideo}, {"decodedAudioPackets", impl_->decodedAudio}, {"renderedVideoFrames", impl_->renderedVideo},
-        {"droppedVideoFrames", impl_->droppedVideo}, {"rebufferings", impl_->rebufferings}, {"decodeErrors", impl_->decodeErrors}, {"concealedSamples", impl_->concealedSamples},
+        {"droppedVideoFrames", impl_->droppedVideo}, {"droppedAudioPackets",impl_->droppedAudio}, {"rebufferings", impl_->rebufferings}, {"decodeErrors", impl_->decodeErrors}, {"concealedSamples", impl_->concealedSamples},
         {"audioEnergy", impl_->decodedAudioEnergy}, {"videoChecksum", impl_->videoChecksum}, {"avDriftUs", impl_->avDriftUs}, {"maxAvDriftUs", impl_->maxAvDriftUs}, {"audioQueuedBytes", SDL_GetQueuedAudioSize(impl_->device)},
+        {"audioClockUs", impl_->audioClock()}, {"audioEndUs",impl_->audioEndUs},
+        {"videoFrontUs",impl_->videos.empty()?0:impl_->videos.front().pts},{"audioFrontUs",impl_->audios.empty()?0:impl_->audios.front().pts},
+        {"playbackCutoffUs",impl_->state.cutoffUs},{"playing",impl_->state.playing},{"hostAnchorUs",hostAnchorUs.load()},
         {"buffering", impl_->buffering}, {"clockOffsetUs", clock.offsetUs()}, {"clockRttUs", clock.rttUs()}, {"epoch", impl_->state.epoch}, {"movieUs", impl_->state.movieUs}};
 }
 }

@@ -28,7 +28,7 @@ struct PlaybackState {
     Json json() const;
     static PlaybackState parse(const Json& j);
 };
-// NTP four-timestamp estimator; keeps the lowest-RTT sample to limit queueing bias.
+// NTP four-timestamp estimator; keeps the lowest-RTT sample over a renewing window, with bounded clock correction.
 class ClockEstimator {
 public:
     bool sample(int64_t t0, int64_t t1, int64_t t2, int64_t t3);
@@ -36,9 +36,10 @@ public:
     int64_t offsetUs() const;
     int64_t rttUs() const;
     bool ready() const;
+    void reset();
 private:
     mutable std::mutex mutex_;
-    int64_t offset_ = 0, rtt_ = 0;
+    int64_t offset_ = 0, rtt_ = 0, lastBest_ = 0;
     bool ready_ = false;
 };
 // Map a wrapping RTP timestamp to the nearest timestamp around an authenticated host-clock anchor.

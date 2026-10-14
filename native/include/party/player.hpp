@@ -15,6 +15,7 @@ public:
     bool needsKeyframe();
     ClockEstimator clock;
     std::atomic<int64_t> hostAnchorUs{0};
+    std::atomic<int64_t> cutoffUs{0};
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

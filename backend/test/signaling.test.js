@@ -79,3 +79,87 @@ test('HTTP signaling rejects identity spoofing, missing membership session, and 
   assert.equal((await call({path:`/v1/rooms/${f.r.roomId}/signals`,headers:{authorization:'Bearer jwt','x-appwrite-user-id':'host'}})).status,403);
   assert.equal((await call({path:`/v1/rooms/${f.r.roomId}/signals`,method:'POST',bodyJson:{sdp:'x'.repeat(70000)}})).status,413);
 });
+test('post-ACK response loss retries are idempotent and conflicting IDs rejected',async()=>{
+  const f=await connected();
+  const input={messageId:'e'.repeat(32),to:'viewer',generation:f.p.generation,type:'offer',payload:{sdp:sdp('sendonly')}};
+  const first=await f.signaling.send(f.r.roomId,'host',f.r.sessionId,input);
+  await f.signaling.ack(f.r.roomId,'viewer',f.v.sessionId,{messageIds:[first.messageId]});
+  assert.deepEqual(await f.signaling.send(f.r.roomId,'host',f.r.sessionId,input),first);
+  assert.equal((await f.signaling.inbox(f.r.roomId,'viewer',f.v.sessionId)).messages.length,0);
+  await assert.rejects(f.signaling.send(f.r.roomId,'host',f.r.sessionId,{...input,payload:{sdp:sdp('sendonly')+'a=test:changed\r\n'}}),rejects('MESSAGE_REUSE'));
+});
+test('restart authorization response loss does not rotate the connection twice',async()=>{
+  const f=await connected(),input={viewerId:'viewer',restart:true,requestId:'f'.repeat(32)};
+  const first=await f.signaling.connect(f.r.roomId,'host',f.r.sessionId,input);
+  const retry=await f.signaling.connect(f.r.roomId,'host',f.r.sessionId,input);
+  assert.equal(first.generation,retry.generation);
+  assert.equal((await f.rooms.read(f.r.roomId,'host',f.r.sessionId)).connection.generation,first.generation);
+});
+test('persisted creation and failed invite budgets reject API abuse',async()=>{
+  const f=fixture();for(let i=0;i<4;++i)await f.rooms.create('host');
+  await assert.rejects(f.rooms.create('host'),rejects('RATE_LIMIT'));
+  f.advance(3600000);const r=await f.rooms.create('host');
+  for(let i=0;i<30;++i)await assert.rejects(f.rooms.join(r.roomId,'attacker','x'.repeat(32)),rejects('INVALID_INVITE'));
+  await assert.rejects(f.rooms.join(r.roomId,'attacker',r.inviteCode),rejects('RATE_LIMIT'));
+});
+
+test('queued authorization after viewer departure does not revoke host membership',async()=>{
+  const f=await connected();await f.rooms.leave(f.r.roomId,'viewer',f.v.sessionId);
+  await assert.rejects(f.signaling.connect(f.r.roomId,'host',f.r.sessionId,{viewerId:'viewer'}),rejects('REMOTE_PEER_EXPIRED'));
+  assert.equal((await f.rooms.heartbeat(f.r.roomId,'host',f.r.sessionId)).ok,true);
+  assert.equal((await f.rooms.read(f.r.roomId,'host',f.r.sessionId)).status,'open');
+});
+
+test('cleanup expires receipts and removes retained closed room dependencies',async()=>{
+  const f=await connected();await f.send('host','offer',{sdp:sdp('sendonly')});
+  await f.rooms.close(f.r.roomId,'host',f.r.sessionId);f.advance(120001);await f.rooms.cleanup();
+  assert.equal(f.tables.Notification.size,0);assert.equal(f.tables.Room.size,1);
+  f.advance(2*86400000);await f.rooms.cleanup();
+  for(const name of ['Room','Member','Peer','Signal','Notification'])assert.equal(f.tables[name].size,0,name);
+});
+
+test('expired-lease retries preserve session and an established replacement generation',async()=>{
+  const f=await connected();f.advance(120001);
+  const request={previousSession:f.v.sessionId,requestId:'a'.repeat(32)};
+  const first=await f.rooms.join(f.r.roomId,'viewer',undefined,request);
+  assert.notEqual(first.sessionId,f.v.sessionId);
+  const host=await f.rooms.join(f.r.roomId,'host');
+  const peer=await f.signaling.connect(f.r.roomId,'host',host.sessionId,{viewerId:'viewer'});
+  const retry=await f.rooms.join(f.r.roomId,'viewer',undefined,request);
+  assert.equal(retry.sessionId,first.sessionId);
+  assert.equal((await f.rooms.read(f.r.roomId,'host',host.sessionId)).connection.generation,peer.generation);
+});
+test('lease recovery cannot steal a newer session or rotate an active lease',async()=>{
+  const f=await connected(),request={previousSession:f.v.sessionId,requestId:'b'.repeat(32)};
+  await assert.rejects(f.rooms.join(f.r.roomId,'viewer',undefined,request),rejects('LEASE_ACTIVE'));
+  f.advance(120001);const first=await f.rooms.join(f.r.roomId,'viewer',undefined,request);
+  const newer=await f.rooms.join(f.r.roomId,'viewer');
+  await assert.rejects(f.rooms.join(f.r.roomId,'viewer',undefined,request),rejects('STALE_SESSION'));
+  assert.notEqual(newer.sessionId,first.sessionId);
+});
+
+test('SDP rejects conflicting directions and codec mappings in the wrong media section', async () => {
+  const f = await connected();
+  const valid = sdp('sendonly');
+  const invalid = [
+    valid.replace('a=sendonly\r\n', 'a=sendonly\r\na=recvonly\r\n'),
+    valid.replace('a=sendonly\r\n', 'a=sendonly\r\na=sendrecv\r\n'),
+    valid.replace('a=sendonly\r\n', 'a=sendonly\r\na=sendonly\r\n'),
+    valid.replace('a=rtpmap:96 H264/90000\r\n', '') + 'a=rtpmap:96 H264/90000\r\n',
+    valid + 'm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n'.repeat(2),
+  ];
+  for (const bad of invalid) await assert.rejects(f.send('host', 'offer', {sdp:bad}), rejects('INVALID_SDP'));
+  await f.send('host', 'offer', {sdp:valid});
+  await assert.rejects(f.send('viewer', 'answer', {sdp:sdp('recvonly').replace('a=recvonly\r\n', 'a=recvonly\r\na=sendonly\r\n')}), rejects('INVALID_SDP'));
+});
+
+test('signal identifiers reject arrays instead of coercing them to strings', async () => {
+  const f = await connected();
+  const input = {messageId:'a'.repeat(32), generation:f.p.generation, to:'viewer', type:'offer', payload:{sdp:sdp('sendonly')}};
+  for (const key of ['messageId', 'generation', 'to']) {
+    await assert.rejects(f.signaling.send(f.r.roomId, 'host', f.r.sessionId, {...input, [key]:[input[key]]}), rejects('INVALID_SIGNAL'));
+  }
+  await assert.rejects(f.signaling.connect(f.r.roomId, 'host', f.r.sessionId, {viewerId:['viewer']}), rejects('INVALID_PEER'));
+  await assert.rejects(f.signaling.connect(f.r.roomId, 'host', f.r.sessionId, {viewerId:'viewer', requestId:['a'.repeat(32)]}), rejects('INVALID_PEER'));
+  await assert.rejects(f.signaling.ack(f.r.roomId, 'viewer', f.v.sessionId, {messageIds:[['a'.repeat(32)]]}), rejects('INVALID_ACK'));
+});

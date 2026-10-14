@@ -27,7 +27,8 @@ void PacketGuard::incoming(rtc::message_vector& messages, const rtc::message_cal
             if (offset + 4 > b.size() || (b[offset] >> 6) != 2) return true;
             const size_t size = (size_t(u16(b, offset+2)) + 1) * 4;
             if (size < 8 || size > b.size() - offset) return true;
-            const auto type = b[offset+1], count = b[offset] & 31;
+            const auto type = b[offset+1];
+            const auto count = b[offset] & 31;
             if ((type == 200 && size < 28 + size_t(count)*24) || (type == 201 && size < 8 + size_t(count)*24) ||
                 ((type == 205 || type == 206) && size < 12)) return true;
             offset += size;
@@ -44,15 +45,26 @@ void RtpReceiver::incoming(rtc::message_vector& messages, const rtc::message_cal
         auto p = parseRtp(bytes(*m));
         if (!p || p->payloadType != (video_ ? 96 : 111)) { ++stats->malformed; continue; }
         const auto time = nowUs();
+        const auto anchor=anchorUs_.load();
+        const auto transport=anchor?unwrapTimestamp(p->timestamp,video_?90000:48000,anchor):0;
+        if(anchor && transport<cutoffUs_) continue;
         if (!initialized_) { initialized_ = true; highest_ = expected_ = p->sequence; ssrc_ = p->ssrc; }
         if (p->ssrc != ssrc_) { ++stats->malformed; continue; }
         const int64_t seq = highest_ + int16_t(p->sequence - uint16_t(highest_));
         if (seq < expected_ || pending_.contains(seq)) { ++stats->duplicates; continue; }
-        if (seq > expected_ + 1024 || pending_.size() >= 512) { ++stats->malformed; continue; }
+        if (seq > expected_ + 1024) {
+            // A burst beyond the retransmission window used to pin expected_
+            // forever: every later packet was rejected as too far ahead.
+            // Abandon the unrecoverable gap and partial access unit, then ask
+            // for an IDR from pump (the application thread), not this callback.
+            stats->lost += uint64_t(seq-expected_) - pending_.size();
+            pending_.clear(); discardFrame(); expected_=seq;
+            gapStart_=lastNack_=transit_=0; recoveryNeeded_=video_;
+        }
+        if (pending_.size() >= 512) { ++stats->malformed; continue; }
         highest_ = std::max(highest_, seq);
-        const auto transport = unwrapTimestamp(p->timestamp, video_ ? 90000 : 48000, anchorUs_.load());
-        const auto transit = time - transport;
-        if (transit_) { const int64_t difference = std::abs(transit - transit_); const auto previous = stats->jitterUs.load(); stats->jitterUs = previous + (difference - previous) / 16; }
+        const auto transit = anchor?time-transport:0;
+        if (transit_ && anchor) { const int64_t difference = std::abs(transit - transit_); const auto previous = stats->jitterUs.load(); stats->jitterUs = previous + (difference - previous) / 16; }
         transit_ = transit;
         pending_.emplace(seq, Entry{m, time}); ++stats->received;
     }
@@ -60,6 +72,7 @@ void RtpReceiver::incoming(rtc::message_vector& messages, const rtc::message_cal
 }
 void RtpReceiver::pump(int64_t time) {
     std::lock_guard lock(mutex_);
+    if(recoveryNeeded_) { recoveryNeeded_=false; keyframe_(); }
     while (!pending_.empty()) {
         auto it = pending_.begin();
         if (it->first != expected_) {
@@ -72,7 +85,7 @@ void RtpReceiver::pump(int64_t time) {
                 for (int64_t k = 0; k < missing; ++k) { nack->parts[k].setPid(uint16_t(expected_ + k)); nack->parts[k].setBlp(0); }
                 send_(message); lastNack_ = time; stats->nacks += uint64_t(missing);
             }
-            if (time - gapStart_ < 60000) break;
+            if (time - gapStart_ < reorderUs_.load()) break;
             stats->lost += uint64_t(it->first - expected_); expected_ = it->first;
             if (video_) { damaged_ = true; fragment_ = false; keyframe_(); }
         }
@@ -80,6 +93,10 @@ void RtpReceiver::pump(int64_t time) {
         if (auto p = parseRtp(bytes(*it->second.message))) deliver(*p);
         pending_.erase(it); ++expected_;
     }
+}
+void RtpReceiver::setCutoff(int64_t cutoff) {
+    std::lock_guard lock(mutex_);cutoffUs_=cutoff;pending_.clear();discardFrame();
+    initialized_=false;recoveryNeeded_=false;gapStart_=lastNack_=transit_=0;
 }
 void RtpReceiver::discardFrame() { frame_.clear(); fragment_ = false; damaged_ = false; }
 void RtpReceiver::deliver(const RtpPacket& p) {
@@ -92,6 +109,7 @@ void RtpReceiver::deliver(const RtpPacket& p) {
     if (frame_.empty()) frameTimestamp_ = p.timestamp;
     const auto b = p.payload; const auto type = b[0] & 31;
     const auto separator = [&] { frame_.insert(frame_.end(), {0,0,0,1}); };
+    if ((b[0]&128) || (fragment_ && type!=28)) damaged_=true;
     if (type > 0 && type < 24) { separator(); frame_.insert(frame_.end(), b.begin(), b.end()); }
     else if (type == 24) {
         size_t offset = 1;
@@ -104,7 +122,7 @@ void RtpReceiver::deliver(const RtpPacket& p) {
     } else if (type == 28 && b.size() >= 3) {
         const auto unit = b[1] & 31;
         if (!unit || unit >= 24 || (b[1] & 32) || ((b[1] & 192) == 192)) damaged_ = true;
-        if (b[1] & 128) { separator(); frame_.push_back(uint8_t((b[0] & 224) | unit)); fragment_ = true; }
+        if (b[1] & 128) { if(fragment_) damaged_=true; separator(); frame_.push_back(uint8_t((b[0] & 224) | unit)); fragment_ = true; }
         if (!fragment_) damaged_ = true;
         if (!damaged_) frame_.insert(frame_.end(), b.begin()+2, b.end());
         if (b[1] & 64) fragment_ = false;

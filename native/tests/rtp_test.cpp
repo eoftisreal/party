@@ -34,6 +34,34 @@ int main() {
         expect(frames.size()==2,"Receiver did not recover after missing fragment");
         input(packet(5,99000,true,{0x78,0,20,0x65}));
         expect(receiver.stats->frames==2,"Malformed STAP-A was emitted");
+        // Packets before a clock state must not bias jitter by an entire monotonic epoch.
+        RtpReceiver cold(true,[](auto){},[]{});
+        rtc::message_vector pre{packet(10,90000,true,{0x65,1})};cold.incoming(pre,[](auto){});cold.pump(nowUs());
+        cold.setAnchor(anchor);rtc::message_vector post{packet(11,93000,true,{0x65,1})};cold.incoming(post,[](auto){});
+        expect(cold.stats->jitterUs==0,"Missing clock anchor inflated jitter");
+        const auto count=frames.size();receiver.setCutoff(anchor+100000);
+        input(packet(6,96000,true,{0x65,1}));receiver.pump(nowUs()+300000);
+        expect(frames.size()==count,"Previous playback epoch leaked after seek");
+        input(packet(50,108000,false,{0x7c,0x85,1}));
+        input(packet(51,108000,true,{0x65,2}));receiver.pump(nowUs()+300000);
+        expect(frames.size()==count,"Interrupted FU-A emitted corrupt frame");
+        input(packet(52,111000,true,{0xe5,2}));receiver.pump(nowUs()+300000);
+        expect(frames.size()==count,"H264 forbidden bit accepted");
+        receiver.setReorderWindow(200000);
+        input(packet(53,114000,false,{0x7c,0x85,1}));
+        input(packet(55,114000,true,{0x7c,0x45,3}));receiver.pump(nowUs()+100000);
+        input(packet(54,114000,false,{0x7c,0x05,2}));receiver.pump(nowUs()+210000);
+        expect(frames.size()==count+1,"Retransmission discarded before longer RTT deadline");
+        // More than 1024 missing packets must recover without replacing ICE.
+        const auto beforeBurst=frames.size();const auto requestsBeforeBurst=requests;
+        input(packet(56,117000,false,{0x7c,0x85,1}));
+        input(packet(2056,120000,true,{0x65,9}));
+        expect(frames.size()==beforeBurst+1 && requests>requestsBeforeBurst,"Long RTP loss burst pinned the receive sequence forever");
+        expect(frames.back().data==std::vector<uint8_t>({0,0,0,1,0x65,9}),"Pre-gap partial access unit leaked into recovered IDR");
+        input(packet(57,117000,true,{0x7c,0x45,2}));
+        expect(frames.size()==beforeBurst+1,"Delayed pre-gap packet corrupted recovery");
+        input(packet(2057,123000,true,{0x65,10}));
+        expect(frames.size()==beforeBurst+2,"Post-burst RTP did not continue");
         PacketGuard guard; rtc::message_vector bad{rtc::make_message(4,rtc::Message::Control)};
         guard.incoming(bad,[](auto){}); expect(bad.empty(),"Truncated RTCP passed guard");
         std::cout << "RTP reorder, loss, wrap and hostile-payload checks passed\n";

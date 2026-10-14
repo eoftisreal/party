@@ -7,7 +7,7 @@ export function makeAppwriteStore(env, runtimeKey) {
   const key = env.PARTY_APPWRITE_API_KEY || runtimeKey;
   if (!endpoint || !project || !databaseId || !key) throw Error('Missing Appwrite configuration');
   const db = new Databases(new Client().setEndpoint(endpoint).setProject(project).setKey(key));
-  const collections = Object.fromEntries(['rooms', 'members', 'peers', 'signals', 'notifications'].map(name =>
+  const collections = Object.fromEntries(['rooms', 'members', 'peers', 'signals', 'notifications', 'limits'].map(name =>
     [name, env[`PARTY_${name.toUpperCase()}_COLLECTION_ID`] || name]));
   const maybe = async promise => { try { return await promise; } catch (e) { if (e.code === 404) return null; throw e; } };
   function scoped(transactionId) {
@@ -35,11 +35,13 @@ export function makeAppwriteStore(env, runtimeKey) {
       updateMember: (id, data) => update('members', id, data), deleteMember: id => remove('members', id),
       listMembers: id => list('members', [Query.equal('roomId', id)]),
       getPeer: id => get('peers', id), createPeer: (id, data) => create('peers', id, data),
-      updatePeer: (id, data) => update('peers', id, data),
+      updatePeer: (id, data) => update('peers', id, data), deletePeer: id => remove('peers', id),
       listPeers: id => list('peers', [Query.equal('roomId', id)]),
       getSignal: id => get('signals', id), createSignal: (id, data) => create('signals', id, data),
       deleteSignal: id => remove('signals', id),
       listSignals: id => list('signals', [Query.equal('roomId', id)]),
+      getReceipt: id => get('notifications', id),
+      getLimit: id => get('limits', id), createLimit: (id,data) => create('limits',id,data), updateLimit: (id,data) => update('limits',id,data),
       notify: async (id, data) => {
         if (!await get('notifications', id)) return create('notifications', id, data, [Permission.read(Role.user(data.userId))]);
       },

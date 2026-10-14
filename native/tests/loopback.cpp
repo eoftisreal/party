@@ -43,7 +43,10 @@ int main(int argc, char** argv) {
         });
         const bool impair = env("PARTY_TEST_IMPAIR") == "1";
         std::shared_ptr<Impairment> impairment;
+        std::vector<Json> toViewer,toHost;uint64_t deferredIce=0,duplicateSdp=0,sentEpoch=UINT64_MAX;
+        int64_t connectBegan=0;
         auto connect = [&] {
+            toViewer.clear();toHost.clear();sentEpoch=UINT64_MAX;connectBegan=nowUs();
             rtc::Configuration config; config.disableAutoNegotiation = true; config.mtu = 1200; config.bindAddress = "127.0.0.1";
             const auto h = Peer::create(true, config, [](auto) {}, [&](Json j) {
                 if (j.value("type", "") == "ping") {
@@ -67,34 +70,51 @@ int main(int argc, char** argv) {
         connect();
         const auto start = nowUs();
         int64_t lastState=0, lastPing=0, connectedAt=0;
-        bool played=false, paused=false, resumed=false, sought=false, reconnected=false, secondPlayed=false, stopped=false;
+        bool played=false, paused=false, resumed=false, sought=false, backward=false, forwardAgain=false, reconnected=false, secondPlayed=false, stopped=false;
         uint64_t videoBeforePause=0, videoBeforeReconnect=0;
         while (nowUs()-start < 22000000) {
-            for (const auto& m : host->takeSignals()) viewer->signal(m);
-            for (const auto& m : viewer->takeSignals()) host->signal(m);
-            host->pump(); viewer->hostAnchorUs = player.hostAnchorUs.load(); viewer->pump(); player.tick();
+            auto transfer=[&](auto& pending,auto from,auto to,bool holdOffer){
+                const auto outgoing=from->takeSignals();pending.insert(pending.end(),outgoing.begin(),outgoing.end());
+                const bool candidates=std::any_of(pending.begin(),pending.end(),[](const Json& m){return m.at("type")=="candidate";});
+                std::stable_sort(pending.begin(),pending.end(),[](const Json& a,const Json& b){return (a.at("type")=="candidate")>(b.at("type")=="candidate");});
+                std::erase_if(pending,[&](const Json& m){
+                    if(holdOffer && m.at("type")=="offer" && !candidates && nowUs()-connectBegan<250000)return false;
+                    if(!to->signal(m)){++deferredIce;return false;}
+                    require(to->signal(m),"Duplicate applied SDP/ICE failed");
+                    if(m.at("type")!="candidate")++duplicateSdp;
+                    return true;
+                });
+            };
+            transfer(toViewer,host,viewer,true);transfer(toHost,viewer,host,false);
+            host->pump(); viewer->hostAnchorUs=player.hostAnchorUs.load();viewer->receiveCutoffUs=player.cutoffUs.load();viewer->pump();
+            // Genuine received media accumulates while the output thread is delayed.
+            if(!connectedAt || nowUs()-connectedAt<250000 || nowUs()-connectedAt>1750000)player.tick();
             if (host->connected() && viewer->connected()) {
                 if (!connectedAt) connectedAt = nowUs();
                 if (!played) { source.play(); played=true; }
                 if (reconnected && !secondPlayed) { source.seek(source.state().movieUs); source.play(); secondPlayed=true; }
-                if (nowUs()-lastState > 50000) { host->control(source.state().json()); lastState=nowUs(); }
+                if (nowUs()-lastState > 50000) { const auto state=source.state();
+                    if(sentEpoch!=state.epoch){host->discardQueuedMedia();sentEpoch=state.epoch;}
+                    host->control(state.json()); lastState=nowUs(); }
                 if (nowUs()-lastPing > 250000) { viewer->control(player.ping()); lastPing=nowUs(); }
                 if (host->forceKeyframe.exchange(false)) source.keyframe();
                 source.bitrate(host->targetBitrate);
                 if (player.needsKeyframe()) viewer->control({{"type", "keyframe"}});
                 const auto elapsed = nowUs()-connectedAt;
-                if (elapsed > 3000000 && !paused) { source.pause(); paused=true; videoBeforePause=player.stats().at("renderedVideoFrames"); }
+                if (elapsed > 3000000 && !paused) { require(player.stats().at("renderedVideoFrames").get<uint64_t>()>15,"Delayed output startup never recovered");source.pause(); paused=true; videoBeforePause=player.stats().at("renderedVideoFrames"); }
                 if (elapsed > 4000000 && !resumed) {
                     require(player.stats().at("renderedVideoFrames").get<uint64_t>() <= videoBeforePause+3, "Viewer continues rendering while paused");
                     source.play(); resumed=true;
                 }
                 if (elapsed > 6000000 && !sought) { source.seek(12000000); sought=true; }
+                if(elapsed>7500000 && !backward){source.seek(3000000);backward=true;}
+                if(elapsed>8500000 && !forwardAgain){source.seek(15000000);forwardAgain=true;}
                 if (elapsed > 10000000 && !reconnected) {
                     require(player.stats().at("decodedVideoFrames").get<uint64_t>() > 60, "Real video was not decoded");
                     require(player.stats().at("decodedAudioPackets").get<uint64_t>() > 100, "Real audio was not decoded");
                     require(source.error().empty(), "Source error before reconnection");
                     videoBeforeReconnect = player.stats().at("renderedVideoFrames");
-                    source.pause(); host->close(); viewer->close(); player.reset();
+                    source.pause();host->videoTrack()->close();host->pump();require(host->failed(),"Closed media track did not trigger recoverable transport failure");host->close(); viewer->close(); player.reset();
                     connect(); reconnected=true;
                 }
                 if (elapsed > 15000000 && secondPlayed && !stopped) { source.stop(); stopped=true; }
@@ -103,7 +123,8 @@ int main(int argc, char** argv) {
             require(source.error().empty(), source.error().c_str());
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
-        require(played && paused && resumed && sought && reconnected && secondPlayed && stopped, "Control/reconnection sequence did not complete");
+        require(played && paused && resumed && sought && backward && forwardAgain && reconnected && secondPlayed && stopped, "Control/reconnection sequence did not complete");
+        require(deferredIce>0 && duplicateSdp>=4,"Real candidate-before-SDP retry/duplicate scenario did not run");
         const auto stats = player.stats();
         require(stats.at("renderedVideoFrames").get<uint64_t>() > videoBeforeReconnect+20, "Video did not recover after new ICE connection");
         require(stats.at("audioEnergy").get<double>() > 1.0, "Decoded audio is silent");
@@ -111,7 +132,7 @@ int main(int argc, char** argv) {
         require(stats.at("maxAvDriftUs").get<int64_t>() <= 60000, "A/V scheduling drift exceeded 60ms");
         if (impair) { require(impairment->dropped.load() > 0 && impairment->reordered.load() > 0, "Impairment did not act on real RTP"); require(viewer->stats().at("video").at("nacks").get<uint64_t>() > 0, "No NACK feedback under loss"); }
         require(source.state().stopped && !source.state().playing, "Stop did not stop source");
-        std::cout << Json{{"test", "real-loopback"}, {"durationUs", nowUs()-start}, {"impaired", impair}, {"injectedDrops", impairment ? impairment->dropped.load() : 0}, {"injectedReordering", impairment ? impairment->reordered.load() : 0}, {"source", source.stats()}, {"host", host->stats()}, {"viewer", viewer->stats()}, {"player", stats}}.dump(2) << '\n';
+        std::cout << Json{{"test", "real-loopback"}, {"deferredIce",deferredIce}, {"duplicateSdpApplications",duplicateSdp}, {"durationUs", nowUs()-start}, {"impaired", impair}, {"injectedDrops", impairment ? impairment->dropped.load() : 0}, {"injectedReordering", impairment ? impairment->reordered.load() : 0}, {"source", source.stats()}, {"host", host->stats()}, {"viewer", viewer->stats()}, {"player", stats}}.dump(2) << '\n';
         source.pause(); host->close(); viewer->close();
         return 0;
     } catch (const std::exception& e) { std::cerr << "Loopback failed: " << e.what() << '\n'; return 1; }

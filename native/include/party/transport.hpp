@@ -4,6 +4,7 @@
 #include <deque>
 #include <functional>
 #include <memory>
+#include <set>
 namespace party {
 class BoundedPacer final : public rtc::MediaHandler {
 public:
@@ -11,7 +12,8 @@ public:
     void outgoing(rtc::message_vector& messages, const rtc::message_callback& send) override;
     void pump(int64_t now);
     int64_t queueUs() const;
-    std::atomic<uint64_t> bytesSent{0}, dropped{0};
+    void clear();
+    std::atomic<uint64_t> bytesSent{0}, dropped{0}, discarded{0};
 private:
     std::atomic<unsigned>& rate_;
     std::atomic<bool>& keyframe_;
@@ -28,7 +30,9 @@ public:
     static std::shared_ptr<Peer> create(bool host, const rtc::Configuration& config, FrameCallback frame, std::function<void(Json)> control);
     ~Peer();
     void offer();
-    void signal(const Json& message);
+    bool signal(const Json& message); // false: prerequisites not yet applied; caller must retry.
+    void discardQueuedMedia();
+    std::atomic<int64_t> receiveCutoffUs{0};
     std::vector<Json> takeSignals();
     void send(const EncodedFrame& frame);
     bool control(const Json& message);
@@ -58,8 +62,11 @@ private:
     std::shared_ptr<RtpReceiver> videoReceiver_, audioReceiver_;
     std::shared_ptr<BoundedPacer> pacer_;
     mutable std::mutex mutex_;
+    std::recursive_mutex callbackMutex_;
     std::deque<Json> outbound_;
-    std::vector<Json> earlyCandidates_;
+    std::string remoteSdp_;
+    std::set<std::string> appliedCandidates_;
+    int64_t appliedCutoffUs_=0;
     std::function<void(Json)> onControl_;
     BitrateController controller_;
     int64_t lastFeedback_ = 0, lastPli_ = 0;

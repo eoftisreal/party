@@ -7,7 +7,9 @@ function exact(value, keys) {
 }
 export function validateSignal(input) {
   exact(input, ['messageId', 'to', 'generation', 'type', 'payload']);
-  if (!idPattern.test(input.messageId || '') || !idPattern.test(input.generation || '') || !userPattern.test(input.to || ''))
+  if (typeof input.messageId !== 'string' || !idPattern.test(input.messageId) ||
+      typeof input.generation !== 'string' || !idPattern.test(input.generation) ||
+      typeof input.to !== 'string' || !userPattern.test(input.to))
     fail(400, 'INVALID_SIGNAL', 'Invalid signal identifiers');
   const { type, payload } = input;
   if (type === 'offer' || type === 'answer') {
@@ -17,10 +19,15 @@ export function validateSignal(input) {
         !/^a=ice-pwd:.+\r?$/m.test(payload.sdp)) fail(400, 'INVALID_SDP', 'WebRTC SDP with ICE and DTLS required');
     const sections = payload.sdp.split(/(?=^m=)/m).slice(1);
     if (sections.some(section => {
-      if (/^m=(video|audio) /.test(section)) return !/^m=(video|audio) \d+ UDP\/TLS\/RTP\/SAVPF /m.test(section) ||
-        !new RegExp(`^a=${type === 'offer' ? 'sendonly' : 'recvonly'}\\r?$`, 'm').test(section);
+      if (/^m=(video|audio) /.test(section)) {
+        const directions = [...section.matchAll(/^a=(sendonly|recvonly|sendrecv|inactive)\r?$/gm)];
+        const codec = section.startsWith('m=video ') ? /^a=rtpmap:96 H264\/90000\r?$/mi : /^a=rtpmap:111 opus\/48000\/2\r?$/mi;
+        return !/^m=(video|audio) \d+ UDP\/TLS\/RTP\/SAVPF /m.test(section) ||
+          directions.length !== 1 || directions[0][1] !== (type === 'offer' ? 'sendonly' : 'recvonly') || !codec.test(section);
+      }
       return !/^m=application \d+ UDP\/DTLS\/SCTP /m.test(section);
-    }) || sections.filter(s => /^m=video /.test(s)).length !== 1 || sections.filter(s => /^m=audio /.test(s)).length !== 1 ||
+    }) || sections.filter(s => /^m=application /.test(s)).length > 1 ||
+        sections.filter(s => /^m=video /.test(s)).length !== 1 || sections.filter(s => /^m=audio /.test(s)).length !== 1 ||
         !/^a=rtpmap:96 H264\/90000\r?$/mi.test(payload.sdp) || !/^a=rtpmap:111 opus\/48000\/2\r?$/mi.test(payload.sdp))
       fail(400, 'INVALID_SDP', 'Require host-send/viewer-receive encrypted audio and video');
   } else if (type === 'candidate') {
@@ -41,25 +48,30 @@ export function makeSignalingService(store, rooms) {
     if (!p) fail(409, 'STALE_GENERATION', 'Connection was replaced or closed');
     const host = await s.getMember(memberId(room.$id, p.hostId)), guest = await s.getMember(memberId(room.$id, p.viewerId));
     if (!host || !guest || host.sessionId !== p.hostSession || guest.sessionId !== p.viewerSession ||
-        [host, guest].some(m => Date.parse(m.lastSeenAt) + 120000 <= rooms.now())) fail(403, 'PEER_EXPIRED', 'Peer session expired');
+        [host, guest].some(m => Date.parse(m.lastSeenAt) + 120000 <= rooms.now())) fail(403, 'REMOTE_PEER_EXPIRED', 'Peer session expired');
     return p;
   }
   return {
     async connect(id, user, session, input) {
-      exact(input, ['viewerId', 'restart']);
-      if (!userPattern.test(input.viewerId || '') || (input.restart !== undefined && typeof input.restart !== 'boolean'))
+      exact(input, ['viewerId', 'restart', 'requestId']);
+      if(input.requestId !== undefined && (typeof input.requestId !== 'string' || !idPattern.test(input.requestId))) fail(400,'INVALID_PEER','Invalid request identifier');
+      if (typeof input.viewerId !== 'string' || !userPattern.test(input.viewerId) || (input.restart !== undefined && typeof input.restart !== 'boolean'))
         fail(400, 'INVALID_PEER', 'Invalid viewer');
       return store.atomic(async s => {
         const { room } = await rooms.authorize(s, id, user, session);
         if (room.hostId !== user || input.viewerId === user) fail(403, 'HOST_ONLY', 'Only host can authorize streaming');
-        const { member: viewer } = await rooms.authorize(s, id, input.viewerId, null, false);
-        if (Date.parse(viewer.lastSeenAt) + 120000 <= rooms.now()) fail(403, 'PEER_EXPIRED', 'Viewer offline');
+        const viewer = await s.getMember(memberId(id, input.viewerId));
+        if (!viewer || Date.parse(viewer.lastSeenAt) + 120000 <= rooms.now()) fail(403, 'REMOTE_PEER_EXPIRED', 'Viewer offline');
         const pid = peerId(id, input.viewerId), previous = await s.getPeer(pid);
+        if (input.requestId && previous?.requestId === input.requestId && previous.hostSession === session && previous.viewerSession === viewer.sessionId) {
+          if(previous.state === 'closed') fail(409,'STALE_GENERATION','Connection already closed');
+          return {generation:previous.generation,viewerId:input.viewerId};
+        }
         if (!input.restart && previous?.state !== 'closed' && previous?.hostSession === session && previous?.viewerSession === viewer.sessionId)
           return { generation: previous.generation, viewerId: input.viewerId };
         for (const m of await s.listSignals(id)) if (m.to === input.viewerId || m.from === input.viewerId) await s.deleteSignal(m.$id);
         const data = { roomId: id, hostId: user, viewerId: input.viewerId, hostSession: session, viewerSession: viewer.sessionId,
-          generation: rooms.token(), state: 'authorized', expiresAt: room.expiresAt };
+          generation: rooms.token(), requestId: input.requestId || '', state: 'authorized', expiresAt: room.expiresAt };
         if (previous) await s.updatePeer(pid, data); else await s.createPeer(pid, data);
         await rooms.touch(s, room);
         return { generation: data.generation, viewerId: input.viewerId };
@@ -69,12 +81,18 @@ export function makeSignalingService(store, rooms) {
       validateSignal(input);
       return store.atomic(async s => {
         const { room, member } = await rooms.authorize(s, id, user, session);
+        const sid = digest(`${id}:${session}:${input.messageId}`).slice(0, 32);
+        const fingerprint = digest(JSON.stringify([input.to,input.generation,input.type,input.payload]));
+        const receipt = await s.getReceipt(sid);
+        if(receipt?.fingerprint && Date.parse(receipt.expiresAt)>rooms.now()) {
+          if(receipt.fingerprint !== fingerprint) fail(409,'MESSAGE_REUSE','Message identifier reused');
+          return {accepted:true,messageId:sid}; // Completed delivery stays idempotent after ACK deletion.
+        }
         const p = await peer(s, room, user, input.generation);
         const other = user === p.hostId ? p.viewerId : p.hostId;
         if (input.to !== other) fail(403, 'INVALID_TARGET', 'Signals must go between authorized host and viewer');
         if ((input.type === 'offer' && user !== p.hostId) || (input.type === 'answer' && user !== p.viewerId))
           fail(403, 'HOST_ONLY', 'Viewer cannot send media offers');
-        const sid = digest(`${id}:${session}:${input.messageId}`).slice(0, 32);
         const payload = JSON.stringify(input.payload), existing = await s.getSignal(sid);
         if (existing) {
           if (existing.payload !== payload || existing.type !== input.type || existing.generation !== input.generation || existing.to !== input.to)
@@ -93,7 +111,7 @@ export function makeSignalingService(store, rooms) {
         await s.createSignal(sid, { roomId: id, from: user, to: input.to, generation: p.generation, type: input.type, payload,
           toSession: user === p.hostId ? p.viewerSession : p.hostSession, expiresAt });
         // Realtime is only a wake-up hint. SDP/ICE remain server-private, fetched after membership checks.
-        await s.notify(sid, { roomId: id, userId: input.to, expiresAt });
+        await s.notify(sid, { roomId: id, userId: input.to, expiresAt, fingerprint });
         if (input.type === 'offer' || input.type === 'answer' || input.type === 'disconnect')
           await s.updatePeer(p.$id, { state: input.type === 'offer' ? 'offered' : input.type === 'answer' ? 'connected' : 'closed' });
         await rooms.touch(s, room);
@@ -120,7 +138,7 @@ export function makeSignalingService(store, rooms) {
     },
     async ack(id, user, session, input) {
       exact(input, ['messageIds']);
-      if (!Array.isArray(input.messageIds) || input.messageIds.length > 64 || input.messageIds.some(x => !idPattern.test(x)))
+      if (!Array.isArray(input.messageIds) || input.messageIds.length > 64 || input.messageIds.some(x => typeof x !== 'string' || !idPattern.test(x)))
         fail(400, 'INVALID_ACK', 'Invalid acknowledgement');
       return store.atomic(async s => {
         const { room } = await rooms.authorize(s, id, user, session);
