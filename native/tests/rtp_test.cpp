@@ -62,6 +62,27 @@ int main() {
         expect(frames.size()==beforeBurst+1,"Delayed pre-gap packet corrupted recovery");
         input(packet(2057,123000,true,{0x65,10}));
         expect(frames.size()==beforeBurst+2,"Post-burst RTP did not continue");
+        // RFC 4585: one 16-byte PID/BLP NACK requests up to 17 missing
+        // sequence numbers; verify exact network bytes across sequence wrap.
+        std::vector<uint8_t> nackWire;
+        RtpReceiver nackReceiver(true, [](auto){}, []{});
+        nackReceiver.setAnchor(anchor);
+        auto receiveForNack = [&](rtc::message_ptr message) {
+            rtc::message_vector messages{message};
+            nackReceiver.incoming(messages,[&](auto feedback){
+                if (feedback->type != rtc::Message::Control) return;
+                const auto* raw = reinterpret_cast<const uint8_t*>(feedback->data());
+                nackWire.assign(raw, raw + feedback->size());
+            });
+            nackReceiver.pump(nowUs());
+        };
+        receiveForNack(packet(65530,90000,true,{0x65,1}));
+        receiveForNack(packet(12,93000,true,{0x65,2}));
+        expect(nackWire.size()==16, "NACK did not pack 17 missing packets into one FCI");
+        expect((nackWire[0]&31)==1 && nackWire[1]==205, "Invalid RTCP Generic NACK header");
+        expect(nackWire[12]==0xff && nackWire[13]==0xfb && nackWire[14]==0xff && nackWire[15]==0xff,
+            "NACK PID/BLP wire format failed across sequence wrap");
+        expect(nackReceiver.stats->nacks==17, "NACK packet request count changed");
         PacketGuard guard; rtc::message_vector bad{rtc::make_message(4,rtc::Message::Control)};
         guard.incoming(bad,[](auto){}); expect(bad.empty(),"Truncated RTCP passed guard");
         std::cout << "RTP reorder, loss, wrap and hostile-payload checks passed\n";
