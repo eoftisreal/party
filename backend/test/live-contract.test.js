@@ -6,7 +6,7 @@ import { appwriteOperation, safeDiagnostic, logDiagnostic } from '../src/diagnos
 
 // SDK requests are real; authentication/storage are offline contract fixtures.
 // The transaction TTL validation matches Appwrite's tagged 2.4.0 source.
-async function execution({ failAt, code = 400, type = 'document_invalid_structure', rollbackFails = false } = {}) {
+async function execution({ failAt, code = 400, type = 'document_invalid_structure', rollbackFails = false, createLimitPerHour } = {}) {
   const original = Client.prototype.call;
   const oldEnv = {...process.env};
   const calls = [], logs = [], persisted = new Map(), transactions = new Map();
@@ -17,6 +17,8 @@ async function execution({ failAt, code = 400, type = 'document_invalid_structur
   process.env.APPWRITE_PROJECT_ID = 'project';
   process.env.PARTY_DATABASE_ID = 'party-v2';
   delete process.env.PARTY_APPWRITE_API_KEY;
+  if (createLimitPerHour === undefined) delete process.env.PARTY_CREATE_LIMIT_PER_HOUR;
+  else process.env.PARTY_CREATE_LIMIT_PER_HOUR = String(createLimitPerHour);
   delete process.env.APPWRITE_FUNCTION_API_ENDPOINT;
   delete process.env.APPWRITE_FUNCTION_PROJECT_ID;
   for (const name of ['ROOMS','MEMBERS','PEERS','SIGNALS','NOTIFICATIONS','LIMITS']) delete process.env[`PARTY_${name}_COLLECTION_ID`];
@@ -72,14 +74,24 @@ test('authenticated room creation uses a valid Appwrite 2.4.0 TTL and commits ro
   const {response,calls,persisted,transactions,logs} = await execution();
   assert.equal(response.status,201);
   const starts = calls.filter(c=>c.path === '/v1/databases/transactions');
-  assert.equal(starts.length,2, 'Rate budget and room each require a transaction');
+  assert.equal(starts.length,1, 'Development-unlimited hosting skips the create budget transaction');
   assert.ok(starts.every(c=>c.payload.ttl === 60));
   const room = persisted.get('rooms:'+response.body.roomId);
   const members = [...persisted].filter(([key])=>key.startsWith('members:')).map(([,value])=>value);
   assert.equal(room.hostId,'host');assert.equal(members.length,1);
   assert.equal(members[0].roomId,room.$id);assert.equal(members[0].sessionId,response.body.sessionId);
-  assert.equal([...persisted.keys()].filter(k=>k.startsWith('limits:')).length,1);
+  assert.equal([...persisted.keys()].filter(k=>k.startsWith('limits:')).length,0);
   assert.equal(transactions.size,0);assert.deepEqual(logs,[]);
+});
+test('optional creation cap still uses a durable transaction budget', async () => {
+  const {response,calls,persisted,logs} = await execution({createLimitPerHour:4});
+  assert.equal(response.status,201);
+  assert.equal(calls.filter(c=>c.path === '/v1/databases/transactions').length,2);
+  const limits=[...persisted].filter(([key])=>key.startsWith('limits:')).map(([,value])=>value);
+  assert.equal(limits.length,1);
+  assert.equal(limits[0].createCount,1);
+  assert.equal([...persisted.keys()].filter(k=>k.startsWith('rooms:')).length,1);
+  assert.deepEqual(logs,[]);
 });
 test('SDK transaction creation failure reports operation/status/type without secrets', async () => {
   const {response,logs,persisted,secret} = await execution({failAt:'transactions.create',type:'general_argument_invalid'});
