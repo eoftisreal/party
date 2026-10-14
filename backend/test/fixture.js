@@ -1,6 +1,6 @@
 import {makeRoomsService} from '../src/rooms.js';
 import {makeSignalingService} from '../src/signaling.js';
-export function fixture() {
+export function fixture(options = {}) {
   const tables = Object.fromEntries(['Room','Member','Peer','Signal','Notification','Limit'].map(n => [n,new Map()]));
   let time = Date.parse('2026-10-13T12:00:00Z'), serial = Promise.resolve();
   function methods(t) {
@@ -37,6 +37,6 @@ export function fixture() {
     });
     serial = operation.catch(()=>{}); return operation;
   };
-  const rooms = makeRoomsService(store,{now:()=>time});
+  const rooms = makeRoomsService(store,{...options,now:()=>time});
   return {store,rooms,signaling:makeSignalingService(store,rooms),rs:tables.Room,ms:tables.Member,tables,advance:ms=>time+=ms};
 }
