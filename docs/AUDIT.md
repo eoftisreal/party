@@ -1,10 +1,10 @@
 # Post-merge audit and verification
 
-Audited `main` at `10e898f8946fde57209275f36c182d11b11aab69`, the merge of PR #1, on 2026-10-13. No later main commits were present. PR #3 (`fix/watch-party-audit-completion`) preserves all seven commits from unmerged PR #2 (`fix/reliable-signaling-and-windows`) and completes the follow-up audit. Neither PR is merged automatically. The FFmpeg/libdatachannel/Appwrite separation and existing working streaming implementation are preserved.
+Audited `main` at `10e898f8946fde57209275f36c182d11b11aab69`, the merge of PR #1, on 2026-10-13. No later main commits were present. PR #3 (`fix/watch-party-audit-completion`) preserves all seven commits from unmerged PR #2 (`fix/reliable-signaling-and-windows`) and completes the follow-up audit. The user subsequently merged PR #3 into main as `4c8d1e90a4aca75c30ebd5cae17ce092473146bc`. The agent did not merge it. The FFmpeg/libdatachannel/Appwrite separation and existing working streaming implementation are preserved.
 
 ## Follow-up audit, 2026-10-14
 
-Main still points to the PR #1 merge; no later main commits were present. The unmerged PR #2 was discovered, reviewed, and preserved rather than reimplemented. Its final CI run [38481494824](https://github.com/eoftisreal/party/actions/runs/38481494824) is now confirmed successful for backend, Linux ASan/UBSan, and Windows/MSVC, including real clean/impaired loopback and separate-process outage tests. This supersedes the historical pending-CI notes below.
+At the start of this follow-up main still pointed to the PR #1 merge. After the user reported updating main, a fresh fetch confirmed the PR #3 merge. Its Git tree exactly matches tested commit `90c64c5f0e791d24fa324227991113c9bd806244`. The unmerged PR #2 was discovered, reviewed, and preserved rather than reimplemented. Its final CI run [38481494824](https://github.com/eoftisreal/party/actions/runs/38481494824) is now confirmed successful for backend, Linux ASan/UBSan, and Windows/MSVC, including real clean/impaired loopback and separate-process outage tests. This supersedes the historical pending-CI notes below.
 
 Additional corrections in PR #3:
 
@@ -13,7 +13,7 @@ Additional corrections in PR #3:
 - SDP validation rejects contradictory/duplicate media directions, codec mappings placed in the wrong media section, multiple data channels and array-valued identifiers. No new media transport or download path is introduced.
 - Windows two-PC instructions now point to this branch and use software encoding first.
 
-Current-head results are recorded in `docs/verification/completion.md` after tests finish. The historical measurements below belong to PR #2 and are not relabeled as new runs. Appwrite Cloud, physical Windows 11 devices/GPU, and separate-network WAN/TURN tests remain unverified; no matching credentials or hardware were available.
+Final source verification, CI links, measurements, and external requirements are recorded in [the completion report](verification/completion.md). The historical measurements below belong to PR #2 and are not relabeled as new runs. Appwrite Cloud, physical Windows 11 devices/GPU, and separate-network WAN/TURN tests remain unverified; no matching credentials or hardware were available.
 
 ## Confirmed defects and corrections
 

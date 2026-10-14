@@ -1,0 +1,250 @@
+{
+  "coordination": "local TLS fixture (not Appwrite Cloud)",
+  "network": "same-machine UDP/DTLS/SRTP",
+  "separateProcesses": true,
+  "outage": {
+    "httpFailureSeconds": 102,
+    "recoverySeconds": 110.033,
+    "newGeneration": true,
+    "pausedAfterRecovery": true
+  },
+  "host": {
+    "authorizing": false,
+    "connectionGeneration": "ab8f7ec7ee81025cf31d3eef090d4340",
+    "coordinationActive": true,
+    "coordinationHealthy": true,
+    "media": {
+      "audioPackets": 1974,
+      "bitrate": 2500000,
+      "encodedBytes": 12568552,
+      "encoder": "libx264",
+      "height": 1080,
+      "videoFrames": 1176,
+      "width": 1920
+    },
+    "network": {
+      "candidateTypes": [
+        1,
+        3
+      ],
+      "connected": true,
+      "connectionState": 2,
+      "dataBytesReceived": 207,
+      "dataBytesSent": 6181,
+      "iceState": 3,
+      "pacerDroppedPackets": 0,
+      "pacerEpochDiscardedPackets": 0,
+      "pacerQueueUs": 25507,
+      "rtpVideoBytesSent": 1497841,
+      "sctpRttMs": 16,
+      "sendFailures": 0,
+      "targetBitrate": 2500000
+    }
+  },
+  "firstViewer": {
+    "authorizing": false,
+    "connectionGeneration": "ef12151019c605f1492cac314d608c71",
+    "coordinationActive": true,
+    "coordinationHealthy": true,
+    "network": {
+      "audio": {
+        "duplicates": 0,
+        "frames": 242,
+        "jitterUs": 36,
+        "lost": 0,
+        "malformed": 0,
+        "nacks": 0,
+        "rtpPackets": 242
+      },
+      "candidateTypes": [
+        1,
+        3
+      ],
+      "connected": true,
+      "connectionState": 2,
+      "dataBytesReceived": 10847,
+      "dataBytesSent": 1429,
+      "iceState": 3,
+      "sctpRttMs": 1,
+      "sendFailures": 0,
+      "targetBitrate": 2500000,
+      "video": {
+        "duplicates": 0,
+        "frames": 143,
+        "jitterUs": 2736,
+        "lost": 0,
+        "malformed": 0,
+        "nacks": 0,
+        "rtpPackets": 1992
+      }
+    },
+    "player": {
+      "audioClockUs": 456975738,
+      "audioEndUs": 457176592,
+      "audioEnergy": 12853.732248464261,
+      "audioFrontUs": 457176697,
+      "audioQueuedBytes": 77128,
+      "avDriftUs": 15533,
+      "buffering": false,
+      "clockOffsetUs": 4,
+      "clockRttUs": 401,
+      "concealedSamples": 0,
+      "decodeErrors": 0,
+      "decodedAudioPackets": 1729,
+      "decodedVideoFrames": 1016,
+      "droppedAudioPackets": 26,
+      "droppedVideoFrames": 19,
+      "epoch": 12,
+      "hostAnchorUs": 457450975,
+      "maxAvDriftUs": 34330,
+      "movieUs": 13613137,
+      "playbackCutoffUs": 452696695,
+      "playing": true,
+      "rebufferings": 1,
+      "renderedVideoFrames": 915,
+      "videoChecksum": 2558445820768528453,
+      "videoFrontUs": 457004507
+    }
+  },
+  "secondViewer": {
+    "authorizing": false,
+    "connectionGeneration": "ab8f7ec7ee81025cf31d3eef090d4340",
+    "coordinationActive": true,
+    "coordinationHealthy": true,
+    "network": {
+      "audio": {
+        "duplicates": 0,
+        "frames": 239,
+        "jitterUs": 46,
+        "lost": 0,
+        "malformed": 0,
+        "nacks": 0,
+        "rtpPackets": 239
+      },
+      "candidateTypes": [
+        1,
+        1
+      ],
+      "connected": true,
+      "connectionState": 2,
+      "dataBytesReceived": 6181,
+      "dataBytesSent": 207,
+      "iceState": 3,
+      "sctpRttMs": 2,
+      "sendFailures": 0,
+      "targetBitrate": 2500000,
+      "video": {
+        "duplicates": 0,
+        "frames": 142,
+        "jitterUs": 2274,
+        "lost": 0,
+        "malformed": 0,
+        "nacks": 0,
+        "rtpPackets": 1992
+      }
+    },
+    "player": {
+      "audioClockUs": 470274364,
+      "audioEndUs": 470474718,
+      "audioEnergy": 1782.2766192250385,
+      "audioFrontUs": 470474813,
+      "audioQueuedBytes": 76936,
+      "avDriftUs": 10197,
+      "buffering": false,
+      "clockOffsetUs": 0,
+      "clockRttUs": 465,
+      "concealedSamples": 0,
+      "decodeErrors": 0,
+      "decodedAudioPackets": 239,
+      "decodedVideoFrames": 141,
+      "droppedAudioPackets": 0,
+      "droppedVideoFrames": 0,
+      "epoch": 15,
+      "hostAnchorUs": 470768977,
+      "maxAvDriftUs": 19743,
+      "movieUs": 18437849,
+      "playbackCutoffUs": 466054835,
+      "playing": true,
+      "rebufferings": 0,
+      "renderedVideoFrames": 127,
+      "videoChecksum": 4108060531367156636,
+      "videoFrontUs": 470297802
+    }
+  },
+  "seekEpochs": [
+    4,
+    5,
+    6,
+    7
+  ],
+  "viewerFiles": [],
+  "exitCodes": [
+    0,
+    0,
+    0
+  ],
+  "coordinationSmoke": "deployment smoke script with synthetic authentication and in-memory DB (not Cloud)",
+  "fixtureCounters": {
+    "signals": 19,
+    "acks": 9,
+    "offers": 6,
+    "answers": 5,
+    "joins": 6,
+    "closed": 4,
+    "signalResponseDropped": 1,
+    "ackResponseDropped": 1,
+    "jwtRequests": 7,
+    "expiredJwts": 2,
+    "statuses": {
+      "POST rooms 401 INVALID_TOKEN": 1,
+      "POST rooms 201 ": 2,
+      "POST heartbeat 200 ": 18,
+      "GET room 200 ": 73,
+      "GET signals 200 ": 76,
+      "POST join 401 INVALID_TOKEN": 1,
+      "POST join 200 ": 4,
+      "POST peers 200 ": 6,
+      "POST signals 202 ": 17,
+      "POST ack 200 ": 9,
+      "GET room 503 SERVICE_UNAVAILABLE": 8,
+      "POST heartbeat 503 SERVICE_UNAVAILABLE": 24,
+      "POST leave 200 ": 3,
+      "GET room 410 ROOM_CLOSED": 1,
+      "POST leave 410 ROOM_CLOSED": 1,
+      "GET room 401 INVALID_TOKEN": 1,
+      "GET room 403 NOT_A_MEMBER": 1,
+      "POST join 403 INVALID_INVITE": 1,
+      "POST peers 403 HOST_ONLY": 1,
+      "POST signals 409 SIGNAL_ORDER": 1,
+      "POST signals 409 STALE_GENERATION": 1,
+      "GET signals 403 STALE_SESSION": 1,
+      "POST peers 403 REMOTE_PEER_EXPIRED": 1,
+      "POST close 200 ": 1,
+      "GET signals 410 ROOM_CLOSED": 1,
+      "POST close 410 ROOM_CLOSED": 1
+    },
+    "outageRemainingMs": 0,
+    "members": [
+      {
+        "user": "host",
+        "ageMs": 6520
+      },
+      {
+        "user": "viewer",
+        "ageMs": 2358
+      },
+      {
+        "user": "host",
+        "ageMs": 21
+      }
+    ]
+  },
+  "passed": true,
+  "resources": {
+    "scope": "all child processes (host, two viewers, Node fixture/smoke and OpenSSL)",
+    "userCpuSeconds": 31.746,
+    "systemCpuSeconds": 2.87,
+    "largestChildPeakRssKiB": 681068
+  },
+  "wallSeconds": 175.042
+}
