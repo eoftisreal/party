@@ -117,6 +117,36 @@ int main(){using namespace party;try{
         expect(retry.current({{"generation",e.at("generation")},{"from",e.at("viewerId")},{"type","answer"}}),"Authorization event preceded authoritative generation refresh");return true;
     });retry.stop();
     expect(authorizations==2,"Authorization retry did not complete");
+    // The server has one shared bounded inbox for both directions. A rejected
+    // outgoing POST must not prevent receiving and ACKing the queued offer.
+    for(const auto status:{429L,503L,409L,0L}) {
+        std::atomic<unsigned> posts{0},incomingPolls{0},drained{0},sent{0};
+        Json original;std::atomic<bool> sameId{true};
+        Signaling congested([&](const std::string& method,const std::string& path,const Json& input)->Json {
+            if(path.ends_with("/signals") && method=="POST") {
+                ++posts;if(original.is_null())original=input;else if(original!=input)sameId=false;
+                if(!drained) {
+                    if(status==0)throw std::runtime_error("Lost HTTP response");
+                    throw HttpError(status,status==429?"INBOX_FULL":status==409?"RETRY":"UNAVAILABLE");
+                }
+                ++sent;return {{"accepted",true}};
+            }
+            if(path.ends_with("/signals")) {++incomingPolls;return {{"messages",drained?Json::array():Json::array({message('6')})}};}
+            if(path.ends_with("/ack")){++drained;return {{"acknowledged",true}};}
+            return room;
+        },room,false,{20000,20000,2000000,4000000});
+        congested.send("host",id('a'),{{"type","candidate"}});congested.start();
+        const auto deadline=nowUs()+3000000;unsigned applications=0;
+        while(nowUs()<deadline && !sent) {
+            for(const auto& e:congested.events())if(e.at("event")=="signal") {
+                ++applications;congested.processed(e.at("messageId"),true);
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        congested.stop();
+        expect(sent==1 && drained>0 && incomingPolls>0 && applications==1,"Outgoing retry starved inbox processing/ACKs");
+        expect(posts==2 && sameId,"Command retry spun or changed message identifier");
+    }
     Signaling bounded([](const auto&,const auto&,const auto&){return Json::object();},room,false);
     for(unsigned i=0;i<128;++i)bounded.send("host",id('a'),{{"type","candidate"}});
     rejected=false;try{bounded.send("host",id('a'),{{"type","candidate"}});}catch(const std::runtime_error&){rejected=true;}

@@ -137,3 +137,29 @@ test('lease recovery cannot steal a newer session or rotate an active lease',asy
   await assert.rejects(f.rooms.join(f.r.roomId,'viewer',undefined,request),rejects('STALE_SESSION'));
   assert.notEqual(newer.sessionId,first.sessionId);
 });
+
+test('SDP rejects conflicting directions and codec mappings in the wrong media section', async () => {
+  const f = await connected();
+  const valid = sdp('sendonly');
+  const invalid = [
+    valid.replace('a=sendonly\r\n', 'a=sendonly\r\na=recvonly\r\n'),
+    valid.replace('a=sendonly\r\n', 'a=sendonly\r\na=sendrecv\r\n'),
+    valid.replace('a=sendonly\r\n', 'a=sendonly\r\na=sendonly\r\n'),
+    valid.replace('a=rtpmap:96 H264/90000\r\n', '') + 'a=rtpmap:96 H264/90000\r\n',
+    valid + 'm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n'.repeat(2),
+  ];
+  for (const bad of invalid) await assert.rejects(f.send('host', 'offer', {sdp:bad}), rejects('INVALID_SDP'));
+  await f.send('host', 'offer', {sdp:valid});
+  await assert.rejects(f.send('viewer', 'answer', {sdp:sdp('recvonly').replace('a=recvonly\r\n', 'a=recvonly\r\na=sendonly\r\n')}), rejects('INVALID_SDP'));
+});
+
+test('signal identifiers reject arrays instead of coercing them to strings', async () => {
+  const f = await connected();
+  const input = {messageId:'a'.repeat(32), generation:f.p.generation, to:'viewer', type:'offer', payload:{sdp:sdp('sendonly')}};
+  for (const key of ['messageId', 'generation', 'to']) {
+    await assert.rejects(f.signaling.send(f.r.roomId, 'host', f.r.sessionId, {...input, [key]:[input[key]]}), rejects('INVALID_SIGNAL'));
+  }
+  await assert.rejects(f.signaling.connect(f.r.roomId, 'host', f.r.sessionId, {viewerId:['viewer']}), rejects('INVALID_PEER'));
+  await assert.rejects(f.signaling.connect(f.r.roomId, 'host', f.r.sessionId, {viewerId:'viewer', requestId:['a'.repeat(32)]}), rejects('INVALID_PEER'));
+  await assert.rejects(f.signaling.ack(f.r.roomId, 'viewer', f.v.sessionId, {messageIds:[['a'.repeat(32)]]}), rejects('INVALID_ACK'));
+});

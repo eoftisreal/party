@@ -7,7 +7,9 @@ function exact(value, keys) {
 }
 export function validateSignal(input) {
   exact(input, ['messageId', 'to', 'generation', 'type', 'payload']);
-  if (!idPattern.test(input.messageId || '') || !idPattern.test(input.generation || '') || !userPattern.test(input.to || ''))
+  if (typeof input.messageId !== 'string' || !idPattern.test(input.messageId) ||
+      typeof input.generation !== 'string' || !idPattern.test(input.generation) ||
+      typeof input.to !== 'string' || !userPattern.test(input.to))
     fail(400, 'INVALID_SIGNAL', 'Invalid signal identifiers');
   const { type, payload } = input;
   if (type === 'offer' || type === 'answer') {
@@ -17,10 +19,15 @@ export function validateSignal(input) {
         !/^a=ice-pwd:.+\r?$/m.test(payload.sdp)) fail(400, 'INVALID_SDP', 'WebRTC SDP with ICE and DTLS required');
     const sections = payload.sdp.split(/(?=^m=)/m).slice(1);
     if (sections.some(section => {
-      if (/^m=(video|audio) /.test(section)) return !/^m=(video|audio) \d+ UDP\/TLS\/RTP\/SAVPF /m.test(section) ||
-        !new RegExp(`^a=${type === 'offer' ? 'sendonly' : 'recvonly'}\\r?$`, 'm').test(section);
+      if (/^m=(video|audio) /.test(section)) {
+        const directions = [...section.matchAll(/^a=(sendonly|recvonly|sendrecv|inactive)\r?$/gm)];
+        const codec = section.startsWith('m=video ') ? /^a=rtpmap:96 H264\/90000\r?$/mi : /^a=rtpmap:111 opus\/48000\/2\r?$/mi;
+        return !/^m=(video|audio) \d+ UDP\/TLS\/RTP\/SAVPF /m.test(section) ||
+          directions.length !== 1 || directions[0][1] !== (type === 'offer' ? 'sendonly' : 'recvonly') || !codec.test(section);
+      }
       return !/^m=application \d+ UDP\/DTLS\/SCTP /m.test(section);
-    }) || sections.filter(s => /^m=video /.test(s)).length !== 1 || sections.filter(s => /^m=audio /.test(s)).length !== 1 ||
+    }) || sections.filter(s => /^m=application /.test(s)).length > 1 ||
+        sections.filter(s => /^m=video /.test(s)).length !== 1 || sections.filter(s => /^m=audio /.test(s)).length !== 1 ||
         !/^a=rtpmap:96 H264\/90000\r?$/mi.test(payload.sdp) || !/^a=rtpmap:111 opus\/48000\/2\r?$/mi.test(payload.sdp))
       fail(400, 'INVALID_SDP', 'Require host-send/viewer-receive encrypted audio and video');
   } else if (type === 'candidate') {
@@ -47,8 +54,8 @@ export function makeSignalingService(store, rooms) {
   return {
     async connect(id, user, session, input) {
       exact(input, ['viewerId', 'restart', 'requestId']);
-      if(input.requestId !== undefined && !idPattern.test(input.requestId)) fail(400,'INVALID_PEER','Invalid request identifier');
-      if (!userPattern.test(input.viewerId || '') || (input.restart !== undefined && typeof input.restart !== 'boolean'))
+      if(input.requestId !== undefined && (typeof input.requestId !== 'string' || !idPattern.test(input.requestId))) fail(400,'INVALID_PEER','Invalid request identifier');
+      if (typeof input.viewerId !== 'string' || !userPattern.test(input.viewerId) || (input.restart !== undefined && typeof input.restart !== 'boolean'))
         fail(400, 'INVALID_PEER', 'Invalid viewer');
       return store.atomic(async s => {
         const { room } = await rooms.authorize(s, id, user, session);
@@ -131,7 +138,7 @@ export function makeSignalingService(store, rooms) {
     },
     async ack(id, user, session, input) {
       exact(input, ['messageIds']);
-      if (!Array.isArray(input.messageIds) || input.messageIds.length > 64 || input.messageIds.some(x => !idPattern.test(x)))
+      if (!Array.isArray(input.messageIds) || input.messageIds.length > 64 || input.messageIds.some(x => typeof x !== 'string' || !idPattern.test(x)))
         fail(400, 'INVALID_ACK', 'Invalid acknowledgement');
       return store.atomic(async s => {
         const { room } = await rooms.authorize(s, id, user, session);

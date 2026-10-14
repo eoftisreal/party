@@ -136,7 +136,8 @@ void Signaling::run(std::stop_token stop) {
     const auto base="/v1/rooms/"+roomId();
     auto request=[&](const std::string& method,const std::string& path,const Json& data=Json::object()){return request_(method,base+path,data);};
     int64_t lastPoll=0,lastRoom=0,lastHeartbeat=0,lastRealtime=0,ackRetryAt=0,leaseRefresh=nowUs();
-    unsigned failures=0; bool suspended=false, eventOverflow=false;
+    unsigned failures=0, commandFailures=0; bool suspended=false, eventOverflow=false;
+    int64_t commandRetryAt=0;
     std::optional<Json> renewal;
     std::string currentSession=room_.value("sessionId","");
     auto event=[&](Json value) {
@@ -167,7 +168,7 @@ void Signaling::run(std::stop_token stop) {
         {std::lock_guard lock(mutex_);commands_.clear();delivery_.clear();}
         room["event"]="rejoined";event(room);suspended=false;leaseRefresh=joinedAt;
         leaseDeadlineUs_=joinedAt+options_.leaseUs*5/6;lastRoom=lastPoll=lastHeartbeat=0;
-        renewal.reset();failures=0;
+        renewal.reset();failures=0;commandFailures=0;commandRetryAt=0;
     };
     while(!stop.stop_requested() && !eventOverflow) {
         try {
@@ -195,7 +196,13 @@ void Signaling::run(std::stop_token stop) {
             }
             std::optional<Json> command;
             {std::lock_guard lock(mutex_);if(!commands_.empty())command=commands_.front();}
-            if(command) {
+            if(command && now>=commandRetryAt) {
+                auto retryCommand=[&] {
+                    // A full shared inbox needs the other direction to keep draining.
+                    // Back off only this POST; never starve polling/ACKs/heartbeats.
+                    const auto delay=std::min(10000u,250u*(1u<<std::min(++commandFailures,5u)));
+                    commandRetryAt=nowUs()+int64_t(delay)*1000;
+                };
                 try {
                     auto result=request("POST","/"+command->at("action").get<std::string>(),command->at("input"));
                     if(command->at("action")=="peers") {
@@ -204,11 +211,16 @@ void Signaling::run(std::stop_token stop) {
                         result["event"]="authorized";event(result);
                     }
                     std::lock_guard lock(mutex_);commands_.pop_front();
+                    commandFailures=0;commandRetryAt=0;
                 } catch(const HttpError& e) {
-                    if(e.status>=500 || e.status==429 || e.code=="RETRY" || e.status==401 || (e.status==403 && e.code!="REMOTE_PEER_EXPIRED") || e.status==410) throw;
-                    {std::lock_guard lock(mutex_);commands_.pop_front();}
-                    event({{"event","error"},{"code",e.code}});
-                }
+                    if(e.status==401 || (e.status==403 && e.code!="REMOTE_PEER_EXPIRED") || e.status==410) throw;
+                    if(e.status>=500 || e.status==429 || e.code=="RETRY") retryCommand();
+                    else {
+                        {std::lock_guard lock(mutex_);commands_.pop_front();}
+                        commandFailures=0;commandRetryAt=0;
+                        event({{"event","error"},{"code",e.code}});
+                    }
+                } catch(const std::exception&) {retryCommand();}
             }
             if(now-lastRoom>=options_.pollUs) {snapshot(request("GET",""));lastRoom=now;}
             if(now-lastPoll>=options_.pollUs || wake_->exchange(false)) {
