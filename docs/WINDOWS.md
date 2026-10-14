@@ -11,7 +11,7 @@ $env:VCPKG_ROOT = 'C:\dev\vcpkg'
 git clone https://github.com/eoftisreal/party.git C:\dev\party
 cd C:\dev\party
 # Check out the development PR branch until it is merged.
-git checkout fix/reliable-signaling-and-windows
+git checkout fix/watch-party-audit-completion
 cmake -S . -B build -G Ninja `
   -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" `
   -DVCPKG_TARGET_TRIPLET=x64-windows -DCMAKE_BUILD_TYPE=Release
@@ -63,8 +63,8 @@ The `.env.example` is a reference; the binary does not implicitly load a `.env` 
 Host PC:
 
 ```powershell
-.\build\party.exe host --file 'D:\Movies\movie.mp4' --preview
-# Use --software for a reproducible software-only test.
+.\build\party.exe host --file 'D:\Movies\movie.mp4' --preview --software
+# Only after software playback passes, omit --software to probe compatible GPU encoders.
 ```
 
 Share the printed room ID and invite code privately. On the viewer PC, use a **different user's** session:

@@ -52,7 +52,16 @@ void RtpReceiver::incoming(rtc::message_vector& messages, const rtc::message_cal
         if (p->ssrc != ssrc_) { ++stats->malformed; continue; }
         const int64_t seq = highest_ + int16_t(p->sequence - uint16_t(highest_));
         if (seq < expected_ || pending_.contains(seq)) { ++stats->duplicates; continue; }
-        if (seq > expected_ + 1024 || pending_.size() >= 512) { ++stats->malformed; continue; }
+        if (seq > expected_ + 1024) {
+            // A burst beyond the retransmission window used to pin expected_
+            // forever: every later packet was rejected as too far ahead.
+            // Abandon the unrecoverable gap and partial access unit, then ask
+            // for an IDR from pump (the application thread), not this callback.
+            stats->lost += uint64_t(seq-expected_) - pending_.size();
+            pending_.clear(); discardFrame(); expected_=seq;
+            gapStart_=lastNack_=transit_=0; recoveryNeeded_=video_;
+        }
+        if (pending_.size() >= 512) { ++stats->malformed; continue; }
         highest_ = std::max(highest_, seq);
         const auto transit = anchor?time-transport:0;
         if (transit_ && anchor) { const int64_t difference = std::abs(transit - transit_); const auto previous = stats->jitterUs.load(); stats->jitterUs = previous + (difference - previous) / 16; }
@@ -63,6 +72,7 @@ void RtpReceiver::incoming(rtc::message_vector& messages, const rtc::message_cal
 }
 void RtpReceiver::pump(int64_t time) {
     std::lock_guard lock(mutex_);
+    if(recoveryNeeded_) { recoveryNeeded_=false; keyframe_(); }
     while (!pending_.empty()) {
         auto it = pending_.begin();
         if (it->first != expected_) {
@@ -86,7 +96,7 @@ void RtpReceiver::pump(int64_t time) {
 }
 void RtpReceiver::setCutoff(int64_t cutoff) {
     std::lock_guard lock(mutex_);cutoffUs_=cutoff;pending_.clear();discardFrame();
-    initialized_=false;gapStart_=lastNack_=transit_=0;
+    initialized_=false;recoveryNeeded_=false;gapStart_=lastNack_=transit_=0;
 }
 void RtpReceiver::discardFrame() { frame_.clear(); fragment_ = false; damaged_ = false; }
 void RtpReceiver::deliver(const RtpPacket& p) {

@@ -1,6 +1,19 @@
 # Post-merge audit and verification
 
-Audited `main` at `10e898f8946fde57209275f36c182d11b11aab69`, the merge of PR #1, on 2026-10-13. No later main commits were present. Development is on `fix/reliable-signaling-and-windows`, PR #2; main is not merged automatically. The FFmpeg/libdatachannel/Appwrite separation and existing working streaming implementation are preserved.
+Audited `main` at `10e898f8946fde57209275f36c182d11b11aab69`, the merge of PR #1, on 2026-10-13. No later main commits were present. PR #3 (`fix/watch-party-audit-completion`) preserves all seven commits from unmerged PR #2 (`fix/reliable-signaling-and-windows`) and completes the follow-up audit. Neither PR is merged automatically. The FFmpeg/libdatachannel/Appwrite separation and existing working streaming implementation are preserved.
+
+## Follow-up audit, 2026-10-14
+
+Main still points to the PR #1 merge; no later main commits were present. The unmerged PR #2 was discovered, reviewed, and preserved rather than reimplemented. Its final CI run [38481494824](https://github.com/eoftisreal/party/actions/runs/38481494824) is now confirmed successful for backend, Linux ASan/UBSan, and Windows/MSVC, including real clean/impaired loopback and separate-process outage tests. This supersedes the historical pending-CI notes below.
+
+Additional corrections in PR #3:
+
+- Outgoing 429/INBOX_FULL, 503, transaction conflicts and transport failures now back off independently of incoming polling/ACKs/heartbeats. Previously a full shared inbox could deadlock negotiation. Four worker regressions require incoming application/ACK to unblock the outgoing retry and verify the same message ID is retained.
+- A forward RTP sequence gap beyond the 1,024-packet reorder bound now resynchronizes the receiver and requests a keyframe on the application thread. Previously all subsequent packets could be rejected indefinitely. Regression covers recovery, removal of pre-gap fragments and delayed stale packets.
+- SDP validation rejects contradictory/duplicate media directions, codec mappings placed in the wrong media section, multiple data channels and array-valued identifiers. No new media transport or download path is introduced.
+- Windows two-PC instructions now point to this branch and use software encoding first.
+
+Current-head results are recorded in `docs/verification/completion.md` after tests finish. The historical measurements below belong to PR #2 and are not relabeled as new runs. Appwrite Cloud, physical Windows 11 devices/GPU, and separate-network WAN/TURN tests remain unverified; no matching credentials or hardware were available.
 
 ## Confirmed defects and corrections
 
@@ -28,7 +41,7 @@ Audited `main` at `10e898f8946fde57209275f36c182d11b11aab69`, the merge of PR #1
 
 Native signaling queues are bounded: 128 outgoing commands/events, 256 ledger entries, 64 ACKs/request, and 128 ICE candidates/peer. Application failure cannot turn into an ACK; transient HTTP failures retain the original identifiers. On heartbeat loss, applications pause/close media before lease expiry and retry coordination; an expired own lease rejoins, while a replaced session fails closed. JWT session authentication renews once after a 401. Realtime remains an optional wake-up hint; HTTP polling is authoritative.
 
-## Verified locally on the corrected implementation
+## Verification recorded by the prior PR #2 task
 
 Ubuntu 24.04 container, GCC 13, FFmpeg 6.1.1, pinned libdatachannel 0.24.1; generated 1920×1080/30fps movie with encoded audio. SDL dummy audio is used. No simulated media counters/frames substitute for decoding the real file.
 
