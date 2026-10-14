@@ -25,20 +25,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: sudo apt-get update && sudo apt-get install -y ninja-build pkg-config libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libswresample-dev libsdl2-dev libcurl4-openssl-dev nlohmann-json3-dev libssl-dev ffmpeg
-      - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DPARTY_SANITIZE=ON
-      - run: cmake --build build --parallel 2
-      - run: ctest --test-dir build --output-on-failure
+      - run: cmake --preset linux-asan-ubsan
+      - run: cmake --build --preset linux-asan-ubsan --parallel 2
+      - run: ctest --preset linux-asan-ubsan
       - run: python3 tools/generate_media.py /tmp/party-test.mp4
-      - run: python3 tools/run_loopback.py build/party_loopback /tmp/party-test.mp4
-      - run: python3 tools/run_loopback.py build/party_loopback /tmp/party-test.mp4 --impair
+      - run: python3 tools/run_loopback.py build/linux-asan-ubsan/party_loopback /tmp/party-test.mp4
+      - run: python3 tools/run_loopback.py build/linux-asan-ubsan/party_loopback /tmp/party-test.mp4 --impair
       - run: python3 tools/generate_media.py /tmp/party-raw.mp4 --raw
-      - run: python3 tools/run_loopback.py build/party_loopback /tmp/party-raw.mp4
+      - run: python3 tools/run_loopback.py build/linux-asan-ubsan/party_loopback /tmp/party-raw.mp4
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
       - run: npm ci
         working-directory: backend
-      - run: python3 tools/two_process.py build/party /tmp/party-test.mp4 --outage --report two-process-linux.json
+      - run: python3 tools/two_process.py build/linux-asan-ubsan/party /tmp/party-test.mp4 --outage --report two-process-linux.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:

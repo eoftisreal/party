@@ -78,12 +78,18 @@ void RtpReceiver::pump(int64_t time) {
         if (it->first != expected_) {
             if (!gapStart_) gapStart_ = it->second.arrival;
             if (time - lastNack_ > 20000 && send_) {
-                const auto missing = std::min<int64_t>(it->first - expected_, 16);
-                auto message = rtc::make_message(rtc::RtcpNack::Size(unsigned(missing)), rtc::Message::Control);
+                // RFC 4585 PID requests the first missing packet; each BLP bit
+                // requests one of the following 16 packets. A single FCI block
+                // covers 17 consecutive losses, including across uint16 wrap.
+                const auto missing = std::min<int64_t>(it->first - expected_, 17);
+                auto message = rtc::make_message(rtc::RtcpNack::Size(1), rtc::Message::Control);
                 auto* nack = reinterpret_cast<rtc::RtcpNack*>(message->data());
-                nack->preparePacket(ssrc_, unsigned(missing));
-                for (int64_t k = 0; k < missing; ++k) { nack->parts[k].setPid(uint16_t(expected_ + k)); nack->parts[k].setBlp(0); }
-                send_(message); lastNack_ = time; stats->nacks += uint64_t(missing);
+                nack->preparePacket(ssrc_, 1);
+                nack->parts[0].setPid(uint16_t(expected_));
+                nack->parts[0].setBlp(uint16_t((1u << unsigned(missing - 1)) - 1u));
+                send_(message); lastNack_ = time;
+                // Preserve the existing metric's meaning: lost packets requested.
+                stats->nacks += uint64_t(missing);
             }
             if (time - gapStart_ < reorderUs_.load()) break;
             stats->lost += uint64_t(it->first - expected_); expected_ = it->first;

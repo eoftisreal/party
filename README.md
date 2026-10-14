@@ -14,6 +14,29 @@ The standalone `party` application supports host play/pause/seek/stop, optional 
 - [Original tests and measurements](docs/TESTS.md)
 - [Integration into the existing player](docs/INTEGRATION.md)
 
+## Reproducible build presets (CMake 3.25+)
+
+The repository includes `CMakePresets.json` for separate Linux Release and
+ASan/UBSan build directories, plus an MSVC x64 Release preset. Linux retains
+system package dependencies; Windows uses the existing pinned `vcpkg.json`
+manifest. These are convenience presets, not a replacement for the native
+media dependencies or the two-PC acceptance tests.
+
+```sh
+# Linux (after installing the packages below)
+cmake --preset linux-asan-ubsan
+cmake --build --preset linux-asan-ubsan --parallel 2
+ctest --preset linux-asan-ubsan
+# For an unsanitized build: replace linux-asan-ubsan with linux-release.
+```
+
+On Windows, set `VCPKG_ROOT` to the directory containing
+`scripts/buildsystems/vcpkg.cmake` and install Visual Studio 2022/C++ before
+running `cmake --preset windows-msvc-release`,
+`cmake --build --preset windows-msvc-release`, and
+`ctest --preset windows-msvc-release`. The Linux sanitizer preset is tested in
+CI; the Windows preset does not claim Windows AddressSanitizer coverage.
+
 ## Linux quick test
 
 ```sh
