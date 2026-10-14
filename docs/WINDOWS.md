@@ -10,8 +10,9 @@ C:\dev\vcpkg\bootstrap-vcpkg.bat
 $env:VCPKG_ROOT = 'C:\dev\vcpkg'
 git clone https://github.com/eoftisreal/party.git C:\dev\party
 cd C:\dev\party
-# Check out the development PR branch until it is merged.
-git checkout fix/watch-party-audit-completion
+# The user merged the verified implementation into main.
+git checkout main
+git pull --ff-only
 cmake -S . -B build -G Ninja `
   -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" `
   -DVCPKG_TARGET_TRIPLET=x64-windows -DCMAKE_BUILD_TYPE=Release

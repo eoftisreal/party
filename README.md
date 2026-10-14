@@ -6,6 +6,7 @@ The standalone `party` application supports host play/pause/seek/stop, optional 
 
 **Status:** real 1080p local peer streaming has been tested, including controls, reconnection and separate host/viewer processes against a local TLS signaling fixture. Appwrite's live deployment, Realtime, cross-Internet NAT/TURN, physical Windows output and GPU encoding still require external verification. The congestion controller is a prototype, not production libwebrtc/GCC. See the measured results and limitations before integration.
 
+- [Verified Windows/Linux results and downloadable executable](docs/verification/completion.md)
 - [Windows build and remote test](docs/WINDOWS.md)
 - [Appwrite setup, schema and API](docs/APPWRITE.md)
 - [Architecture and transport evaluation](docs/ARCHITECTURE.md)
