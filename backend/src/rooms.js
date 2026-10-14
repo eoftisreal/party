@@ -7,7 +7,9 @@ export const memberId = (room, user) => digest(`${room}:${user}`).slice(0, 32);
 export const peerId = (room, user) => digest(`peer:${room}:${user}`).slice(0, 32);
 export const idPattern = /^[a-f0-9]{32}$/;
 export function fail(status, code, message) { throw new ApiError(status, code, message); }
-export function makeRoomsService(store, { now = () => Date.now(), random = randomBytes } = {}) {
+export function makeRoomsService(store, { now = () => Date.now(), random = randomBytes, createLimitPerHour = 0 } = {}) {
+  if (!Number.isSafeInteger(createLimitPerHour) || createLimitPerHour < 0 || createLimitPerHour > 10000)
+    throw Error('Invalid createLimitPerHour (expected integer 0..10000)');
   const token = () => random(16).toString('hex');
   const timestamp = () => new Date(now()).toISOString();
   async function get(s, id) {
@@ -47,6 +49,8 @@ export function makeRoomsService(store, { now = () => Date.now(), random = rando
     for (const m of await s.listSignals(id)) if (m.from === user || m.to === user) await s.deleteSignal(m.$id);
   }
   async function limit(user, kind) {
+    const max = kind === 'create' ? createLimitPerHour : 30;
+    if (max === 0) return; // Development default: unlimited room creation; skips the extra Appwrite transaction.
     await store.atomic(async s => {
       const id=digest('limit:'+user).slice(0,32);
       const original=await s.getLimit(id);
@@ -55,7 +59,7 @@ export function makeRoomsService(store, { now = () => Date.now(), random = rando
       const current=await s.getLimit(id);
       const window=Math.floor(now()/(kind==='create'?3600000:60000));
       const count=current[kind+'Window']===window?current[kind+'Count']:0;
-      if(count >= (kind==='create'?4:30)) fail(429,'RATE_LIMIT','Too many room requests');
+      if(count >= max) fail(429,'RATE_LIMIT','Too many room requests');
       await s.updateLimit(id,{[kind+'Window']:window,[kind+'Count']:count+1});
     });
   }
