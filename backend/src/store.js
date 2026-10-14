@@ -1,4 +1,8 @@
 import { Client, Databases, Account, Query, Permission, Role } from 'node-appwrite';
+import { appwriteOperation } from './diagnostics.js';
+
+// Appwrite 2.4.0 validates transaction TTL in [60, 3600] seconds.
+const TRANSACTION_TTL_SECONDS = 60;
 
 export function makeAppwriteStore(env, runtimeKey) {
   const endpoint = env.APPWRITE_FUNCTION_API_ENDPOINT || env.APPWRITE_ENDPOINT;
@@ -12,15 +16,15 @@ export function makeAppwriteStore(env, runtimeKey) {
   const maybe = async promise => { try { return await promise; } catch (e) { if (e.code === 404) return null; throw e; } };
   function scoped(transactionId) {
     const args = name => ({ databaseId, collectionId: collections[name], ...(transactionId ? { transactionId } : {}) });
-    const get = (name, id) => maybe(db.getDocument({ ...args(name), documentId: id }));
-    const create = (name, id, data, permissions = []) => db.createDocument({ ...args(name), documentId: id, data, permissions });
-    const update = (name, id, data) => db.updateDocument({ ...args(name), documentId: id, data });
-    const remove = (name, id) => db.deleteDocument({ ...args(name), documentId: id });
+    const get = (name, id) => maybe(appwriteOperation(`documents.get:${name}`, () => db.getDocument({ ...args(name), documentId: id })));
+    const create = (name, id, data, permissions = []) => appwriteOperation(`documents.create:${name}`, () => db.createDocument({ ...args(name), documentId: id, data, permissions }));
+    const update = (name, id, data) => appwriteOperation(`documents.update:${name}`, () => db.updateDocument({ ...args(name), documentId: id, data }));
+    const remove = (name, id) => appwriteOperation(`documents.delete:${name}`, () => db.deleteDocument({ ...args(name), documentId: id }));
     async function list(name, filters) {
       const documents = [];
       let cursor;
       do {
-        const page = await db.listDocuments({ ...args(name), queries: [...filters, Query.limit(100), ...(cursor ? [Query.cursorAfter(cursor)] : [])] });
+        const page = await appwriteOperation(`documents.list:${name}`, () => db.listDocuments({ ...args(name), queries: [...filters, Query.limit(100), ...(cursor ? [Query.cursorAfter(cursor)] : [])] }));
         documents.push(...page.documents);
         if (page.documents.length < 100) break;
         cursor = page.documents.at(-1).$id;
@@ -52,13 +56,13 @@ export function makeAppwriteStore(env, runtimeKey) {
   const root = scoped();
   root.atomic = async work => {
     for (let attempt = 0; attempt < 4; ++attempt) {
-      const tx = await db.createTransaction({ ttl: 30 });
+      const tx = await appwriteOperation('transactions.create', () => db.createTransaction({ ttl: TRANSACTION_TTL_SECONDS }));
       try {
         const result = await work(scoped(tx.$id));
-        await db.updateTransaction({ transactionId: tx.$id, commit: true });
+        await appwriteOperation('transactions.commit', () => db.updateTransaction({ transactionId: tx.$id, commit: true }));
         return result;
       } catch (e) {
-        try { await db.updateTransaction({ transactionId: tx.$id, rollback: true }); } catch { /* preserve original error */ }
+        try { await appwriteOperation('transactions.rollback', () => db.updateTransaction({ transactionId: tx.$id, rollback: true })); } catch { /* preserve original error */ }
         if (e.code !== 409 || attempt === 3) throw e;
       }
     }
@@ -69,5 +73,5 @@ export async function verifyUserJWT(token, env) {
   const endpoint = env.APPWRITE_FUNCTION_API_ENDPOINT || env.APPWRITE_ENDPOINT;
   const project = env.APPWRITE_FUNCTION_PROJECT_ID || env.APPWRITE_PROJECT_ID;
   if (!endpoint || !project) throw Error('Missing project info');
-  return (await new Account(new Client().setEndpoint(endpoint).setProject(project).setJWT(token)).get()).$id;
+  return (await appwriteOperation('account.get', () => new Account(new Client().setEndpoint(endpoint).setProject(project).setJWT(token)).get())).$id;
 }

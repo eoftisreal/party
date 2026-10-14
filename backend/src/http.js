@@ -40,8 +40,9 @@ export function makeHandler({ service, signaling, authenticate, logError = () =>
       throw new ApiError(405, 'METHOD_NOT_ALLOWED', 'Method not allowed');
     } catch (e) {
       if (e instanceof ApiError) return res.json({ error: { code: e.code, message: e.message } }, e.status);
+      logError(e);
       if (e.code === 409) return res.json({ error: { code: 'RETRY', message: 'Concurrent update; retry request' } }, 409);
-      logError(e); return res.json({ error: { code: 'INTERNAL_ERROR', message: 'Request failed' } }, 500);
+      return res.json({ error: { code: 'INTERNAL_ERROR', message: 'Request failed' } }, 500);
     }
   };
 }

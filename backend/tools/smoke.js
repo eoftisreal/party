@@ -15,7 +15,8 @@ function sdp(direction){return ['v=0','o=- 1 1 IN IP4 127.0.0.1','s=coordination
   'a=fingerprint:sha-256 '+Array(32).fill('AA').join(':'),
   'm=video 9 UDP/TLS/RTP/SAVPF 96','a=mid:video','a='+direction,'a=rtpmap:96 H264/90000',
   'm=audio 9 UDP/TLS/RTP/SAVPF 111','a=mid:audio','a='+direction,'a=rtpmap:111 opus/48000/2',''].join('\r\n');}
-const created=await call(host,'POST','/v1/rooms',{title:'Live deployment smoke'});assert.equal(created.status,201);
+const created=await call(host,'POST','/v1/rooms',{title:'Live deployment smoke'});
+assert.equal(created.status,201,`Room creation returned HTTP ${created.status}; inspect this execution's party_backend_error log for operation/status/errorType. Do not share JWTs, API keys, or request bodies.`);
 const r=created.body,path='/v1/rooms/'+r.roomId;
 try{
   assert.equal((await call('invalid','GET',path)).status,401);

@@ -76,6 +76,22 @@ An existing player login integration can refresh a JWT file and set `PARTY_JWT_F
 
 Realtime uses `wss://<endpoint>/v1/realtime?project=<project>` and current official SDK `authentication`/`subscribe` messages. Session authentication is optional. If you supply only a JWT, the prototype uses authenticated Function polling rather than placing JWTs in a WebSocket URL. If an older deployed Realtime protocol differs, polling continues, but validate the subscription on your project before claiming Realtime tested. JWT files must be updated atomically by the login integration.
 
+## Room-creation HTTP 500 on Appwrite 2.4.0
+
+Room creation first commits a rate-limit transaction, then a room/host-membership transaction. The earlier backend sent `ttl: 30`, but Appwrite 2.4.0 validates TTL in `[60, 3600]` seconds. The server rejects transaction creation with `general_argument_invalid`; the public Function mapped that SDK error to HTTP 500. The backend now uses `ttl: 60`, retaining transaction isolation, commit/rollback and bounded conflict retries. No schema recreation or additional collection permissions are required for this correction.
+
+Tagged 2.4.0 source: [transaction creation and documents.write scope](https://github.com/appwrite/appwrite/blob/2.4.0/src/Appwrite/Platform/Modules/Databases/Http/Databases/Transactions/Create.php), [TTL constants](https://github.com/appwrite/appwrite/blob/2.4.0/app/init/constants.php). `documents.read`/`documents.write` are the appropriate runtime scopes for the legacy API used here; setup collection/attribute scopes are separate. Other deployment mismatches remain possible and must be diagnosed from the actual error.
+
+Redeploy `Party-Backend` from the fixed branch/commit using root `backend`, entrypoint `src/main.js`, and `npm ci --omit=dev`. Keep `PARTY_DATABASE_ID=party-v2` and the existing six collections. Regenerate the two user JWTs if expired, then rerun `node tools/smoke.js`. This fix was verified with SDK contract tests, not against the user's live Function.
+
+If it still fails, open that execution's error log. A safe diagnostic looks like:
+
+```json
+{"event":"party_backend_error","operation":"transactions.create","status":400,"errorType":"general_argument_invalid","errorName":"AppwriteException"}
+```
+
+Operations identify `transactions.create`, `transactions.commit`, `transactions.rollback`, `account.get`, or `documents.<action>:<logical-collection>`. Error types/names use an allowlist; unrecognized types appear as `unknown`. Logs intentionally omit SDK messages, response bodies, stack traces, URLs, document identifiers, request data and credentials. A rollback failure does not replace the original failing-operation diagnostic. Share only this diagnostic line and the deployed commit when requesting help. Public responses remain generic.
+
 ## Live smoke
 
 Use two different users and newly generated JWTs:
