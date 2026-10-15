@@ -27,7 +27,10 @@ void BoundedPacer::pump(int64_t now) {
     {
         std::lock_guard lock(mutex_);
         if (!last_) last_ = now;
-        tokens_ = std::min(4800.0, tokens_ + std::max<int64_t>(0, now - last_) * (rate_.load() * 1.15 / 8.0) / 1000000.0);
+        const double bytesPerSecond = rate_.load() * 1.15 / 8.0;
+        // Cover a normal 2–5 ms pump cadence at high bitrate, while bounding bursts.
+        const double burst = std::clamp(bytesPerSecond * .01, 4800.0, 32768.0);
+        tokens_ = std::min(burst, tokens_ + std::max<int64_t>(0, now - last_) * bytesPerSecond / 1000000.0);
         last_ = now;
         while (!queue_.empty() && double(queue_.front()->size()) <= tokens_) {
             auto m = queue_.front(); queue_.pop_front(); bytes_ -= m->size(); tokens_ -= double(m->size()); ready.push_back(m);
@@ -37,14 +40,15 @@ void BoundedPacer::pump(int64_t now) {
     if (send) for (auto& m : ready) { send(m); bytesSent += m->size(); }
 }
 int64_t BoundedPacer::queueUs() const { std::lock_guard lock(mutex_); return int64_t(bytes_) * 8 * 1000000 / rate_.load(); }
-std::shared_ptr<Peer> Peer::create(bool host, const rtc::Configuration& config, FrameCallback frame, std::function<void(Json)> control) {
-    auto p = std::shared_ptr<Peer>(new Peer(host)); p->init(config, std::move(frame), std::move(control)); return p;
+std::shared_ptr<Peer> Peer::create(bool host, const rtc::Configuration& config, FrameCallback frame, std::function<void(Json)> control, unsigned initialBitrate, unsigned maxBitrate) {
+    BitrateController validate(initialBitrate, maxBitrate);
+    auto p = std::shared_ptr<Peer>(new Peer(host)); p->initialBitrate_ = initialBitrate; p->maxBitrate_ = maxBitrate; p->targetBitrate = initialBitrate; p->init(config, std::move(frame), std::move(control)); return p;
 }
 void Peer::init(const rtc::Configuration& config, FrameCallback frame, std::function<void(Json)> control) {
     onControl_ = std::move(control);
     pc_ = std::make_shared<rtc::PeerConnection>(config);
     const auto weak = weak_from_this();
-    pc_->onStateChange([weak](auto state) { if (auto self = weak.lock()) self->state_ = state; });
+    pc_->onStateChange([weak](auto state) { if (auto self = weak.lock()) { self->state_ = state; if (state == rtc::PeerConnection::State::Connected) { int64_t unset = 0; self->connectedUs_.compare_exchange_strong(unset, nowUs()); } } });
     pc_->onLocalDescription([weak](const rtc::Description& d) { if (auto self = weak.lock()) {
         std::lock_guard lock(self->mutex_); self->outbound_.push_back({{"type", d.typeString()}, {"payload", {{"sdp", std::string(d)}}}});
     }});
@@ -64,7 +68,7 @@ void Peer::init(const rtc::Configuration& config, FrameCallback frame, std::func
         packetizer->addToChain(std::make_shared<rtc::RtcpSrReporter>(cfg));
         packetizer->addToChain(std::make_shared<rtc::RtcpNackResponder>(1024));
         packetizer->addToChain(std::make_shared<rtc::PliHandler>([weak] { if (auto self = weak.lock()) self->forceKeyframe = true; }));
-        packetizer->addToChain(std::make_shared<rtc::RembHandler>([weak](unsigned bitrate) { if (auto self = weak.lock()) self->targetBitrate = std::clamp(bitrate, 300000u, 5000000u); }));
+        packetizer->addToChain(std::make_shared<rtc::RembHandler>([weak](unsigned bitrate) { if (auto self = weak.lock()) self->targetBitrate = std::clamp(bitrate, 300000u, self->maxBitrate_); }));
         pacer_ = std::make_shared<BoundedPacer>(targetBitrate, forceKeyframe);
         packetizer->addToChain(pacer_);
         auto vg = std::make_shared<PacketGuard>(); vg->addToChain(packetizer); video_->setMediaHandler(vg);
@@ -92,7 +96,16 @@ void Peer::setupChannel(std::shared_ptr<rtc::DataChannel> dc) {
         if (message.size() > 8192) return;
         try { const auto j = Json::parse(message);
             std::lock_guard callbackLock(self->callbackMutex_);
-            if (!self->closed_ && j.is_object() && j.contains("type")) self->onControl_(j); }
+            if (!self->closed_ && j.is_object() && j.contains("type")) {
+                if (j.at("type") == "stream-config") {
+                    if (!self->host_ && j.at("initialBitrate").is_number_unsigned() && j.at("maxBitrate").is_number_unsigned()) {
+                        const auto initial = j.at("initialBitrate").get<uint64_t>(), maximum = j.at("maxBitrate").get<uint64_t>();
+                        if (initial >= 300000 && initial <= maximum && maximum <= 12000000) {
+                            self->remoteConfig_ = (initial << 32) | maximum;
+                        }
+                    }
+                } else self->onControl_(j);
+            } }
         catch (const std::exception&) { /* malformed peer control is rejected */ }
     }});
 }
@@ -167,6 +180,12 @@ void Peer::pump() {
     if(host_ && ((video_ && video_->isClosed()) || (audio_ && audio_->isClosed()))) {
         ++sendFailures;state_=rtc::PeerConnection::State::Failed;if(pacer_)pacer_->clear();return;
     }
+    if (host_ && connected() && !configSent_)
+        configSent_ = control({{"type", "stream-config"}, {"initialBitrate", initialBitrate_}, {"maxBitrate", maxBitrate_}});
+    const auto remoteConfig = remoteConfig_.load();
+    if (!host_ && !configApplied_ && remoteConfig) {
+        controller_ = BitrateController(unsigned(remoteConfig >> 32), unsigned(remoteConfig & 0xffffffffu)); configApplied_ = true;
+    }
     if (pacer_) pacer_->pump(nowUs());
     std::shared_ptr<RtpReceiver> v, a; std::shared_ptr<rtc::Track> vt;
     { std::lock_guard lock(mutex_); v = videoReceiver_; a = audioReceiver_; vt = video_; }
@@ -174,14 +193,16 @@ void Peer::pump() {
     if(cutoff!=appliedCutoffUs_) {if(v)v->setCutoff(cutoff);if(a)a->setCutoff(cutoff);appliedCutoffUs_=cutoff;}
     const auto rtt=pc_->rtt();
     const auto wait=rtt?std::clamp<int64_t>(2*rtt->count()*1000+20000,60000,250000):60000;
-    if(v)v->setReorderWindow(wait);if(a)a->setReorderWindow(wait);
+    if (v) v->setReorderWindow(wait);
+    if (a) a->setReorderWindow(wait);
     if (v) { v->setAnchor(hostAnchorUs); v->pump(nowUs()); }
     if (a) { a->setAnchor(hostAnchorUs); a->pump(nowUs()); }
     if (v && vt && connected() && nowUs() - lastFeedback_ >= 2000000) {
         const auto received = v->stats->received.load(), lost = v->stats->lost.load();
         const auto n = received - previousReceived_, l = lost - previousLost_;
         const double loss = n+l ? double(l)/double(n+l) : 0;
-        vt->requestBitrate(controller_.update(loss, v->stats->jitterUs.load(), 0));
+        // Paused or idle streams provide no evidence of spare bandwidth.
+        if (n+l) vt->requestBitrate(controller_.update(loss, v->stats->jitterUs.load(), 0));
         previousReceived_ = received; previousLost_ = lost; lastFeedback_ = nowUs();
     }
     } catch(const std::exception&) {
@@ -194,6 +215,8 @@ bool Peer::connected() const { return state_ == rtc::PeerConnection::State::Conn
 bool Peer::failed() const { const auto state = state_.load(); return state == rtc::PeerConnection::State::Failed || state == rtc::PeerConnection::State::Disconnected || state == rtc::PeerConnection::State::Closed; }
 Json Peer::stats() const {
     Json result{{"iceState", int(pc_->iceState())}, {"sendFailures", sendFailures.load()}, {"connectionState", int(state_.load())}, {"connected", connected()}, {"targetBitrate", targetBitrate.load()}, {"dataBytesSent", pc_->bytesSent()}, {"dataBytesReceived", pc_->bytesReceived()}};
+    result["connectMs"] = connectedUs_.load() ? (connectedUs_.load()-createdUs_)/1000 : -1;
+    result["maxBitrate"] = maxBitrate_;
     if (const auto rtt = pc_->rtt()) result["sctpRttMs"] = rtt->count();
     rtc::Candidate local, remote;
     if (pc_->getSelectedCandidatePair(&local, &remote)) result["candidateTypes"] = {int(local.type()), int(remote.type())};

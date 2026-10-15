@@ -3,7 +3,7 @@
 #include <functional>
 #include <memory>
 namespace party {
-struct MediaOptions { int width = 1920, height = 1080; bool hardware = true; unsigned bitrate = 2500000; };
+struct MediaOptions { int width = 1920, height = 1080; bool hardware = true; unsigned bitrate = 4000000; unsigned maxBitrate = 8000000; };
 class MediaSource {
 public:
     MediaSource(const std::string& path, MediaOptions options, std::function<void(EncodedFrame)> sink);

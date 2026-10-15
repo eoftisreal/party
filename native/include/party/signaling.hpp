@@ -32,6 +32,7 @@ public:
     Signaling(std::unique_ptr<AppwriteApi> api, Json room, bool host);
     ~Signaling();
     void start();
+    void connecting(bool active);
     void send(const std::string& to, const std::string& generation, const Json& message);
     void authorize(const std::string& viewerId, bool restart = false);
     std::vector<Json> events();
@@ -49,7 +50,7 @@ private:
     Request request_;
     SignalingOptions options_;
     SignalDelivery delivery_;
-    std::atomic<int64_t> leaseDeadlineUs_{0};
+    std::atomic<int64_t> leaseDeadlineUs_{0}, fastPollUntilUs_{0};
     Json room_;
     bool host_;
     std::jthread worker_;

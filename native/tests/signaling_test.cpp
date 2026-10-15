@@ -147,6 +147,22 @@ int main(){using namespace party;try{
         expect(sent==1 && drained>0 && incomingPolls>0 && applications==1,"Outgoing retry starved inbox processing/ACKs");
         expect(posts==2 && sameId,"Command retry spun or changed message identifier");
     }
+    std::atomic<unsigned> setupPolls{0};
+    Signaling fast([&](const std::string&,const std::string& path,const Json&)->Json {
+        if(path.ends_with("/signals")) { ++setupPolls; return {{"messages",Json::array()}}; }
+        return room;
+    },room,false,{2000000,10000000,120000000,300000000});
+    fast.start();
+    const auto fastDeadline=nowUs()+1500000;
+    while(setupPolls<3 && nowUs()<fastDeadline) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    const bool accelerated=setupPolls>=3;
+    fast.connecting(false);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    const auto beforeIdle=setupPolls.load();
+    std::this_thread::sleep_for(std::chrono::milliseconds(600));
+    const auto afterIdle=setupPolls.load(); fast.stop();
+    expect(accelerated,"Connection setup still waits for idle polling interval");
+    expect(beforeIdle==afterIdle,"Fast polling continued after connection");
     Signaling bounded([](const auto&,const auto&,const auto&){return Json::object();},room,false);
     for(unsigned i=0;i<128;++i)bounded.send("host",id('a'),{{"type","candidate"}});
     rejected=false;try{bounded.send("host",id('a'),{{"type","candidate"}});}catch(const std::runtime_error&){rejected=true;}

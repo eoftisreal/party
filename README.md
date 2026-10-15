@@ -12,6 +12,7 @@ The standalone `party` application supports host play/pause/seek/stop, optional 
 - [Architecture and transport evaluation](docs/ARCHITECTURE.md)
 - [Post-merge audit and current verification](docs/AUDIT.md)
 - [Original tests and measurements](docs/TESTS.md)
+- [Streaming quality profiles, diagnostics and tuning](docs/STREAMING_TUNING.md)
 - [Integration into the existing player](docs/INTEGRATION.md)
 
 ## Reproducible build presets (CMake 3.25+)

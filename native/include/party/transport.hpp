@@ -27,7 +27,7 @@ private:
 class Peer final : public std::enable_shared_from_this<Peer> {
 public:
     using FrameCallback = std::function<void(EncodedFrame)>;
-    static std::shared_ptr<Peer> create(bool host, const rtc::Configuration& config, FrameCallback frame, std::function<void(Json)> control);
+    static std::shared_ptr<Peer> create(bool host, const rtc::Configuration& config, FrameCallback frame, std::function<void(Json)> control, unsigned initialBitrate = 4000000, unsigned maxBitrate = 8000000);
     ~Peer();
     void offer();
     bool signal(const Json& message); // false: prerequisites not yet applied; caller must retry.
@@ -54,6 +54,11 @@ private:
     void setupChannel(std::shared_ptr<rtc::DataChannel>);
     void receiverTrack(std::shared_ptr<rtc::Track>, FrameCallback);
     bool host_;
+    unsigned initialBitrate_ = 2500000, maxBitrate_ = 5000000;
+    std::atomic<uint64_t> remoteConfig_{0};
+    bool configSent_ = false, configApplied_ = false;
+    int64_t createdUs_ = nowUs();
+    std::atomic<int64_t> connectedUs_{0};
     std::atomic<bool> closed_{false};
     std::atomic<rtc::PeerConnection::State> state_{rtc::PeerConnection::State::New};
     std::shared_ptr<rtc::PeerConnection> pc_;

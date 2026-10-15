@@ -34,10 +34,13 @@ int main(int argc, char** argv) {
     if (argc != 2) { std::cerr << "Usage: party_loopback generated-local-video.mp4\n"; return 2; }
     try {
         rtc::InitLogger(rtc::LogLevel::Warning);
+        const bool highQuality = env("PARTY_TEST_HIGH_QUALITY") == "1";
+        const unsigned initialRate = highQuality ? 6000000 : 2500000;
+        const unsigned maximumRate = highQuality ? 12000000 : 5000000;
         Player player(env("PARTY_TEST_WINDOW") != "1");
         std::shared_ptr<Peer> host, viewer;
         std::mutex peerMutex;
-        MediaSource source(argv[1], MediaOptions{1920,1080,env("PARTY_TEST_HARDWARE") == "1",2500000}, [&](EncodedFrame frame) {
+        MediaSource source(argv[1], MediaOptions{1920,1080,env("PARTY_TEST_HARDWARE") == "1",initialRate,maximumRate}, [&](EncodedFrame frame) {
             std::shared_ptr<Peer> current; { std::lock_guard lock(peerMutex); current = host; }
             if (current) current->send(frame);
         });
@@ -53,7 +56,7 @@ int main(int argc, char** argv) {
                     std::shared_ptr<Peer> current; { std::lock_guard lock(peerMutex); current = host; }
                     if (current) current->control({{"type", "pong"}, {"t0", j.at("t0")}, {"t1", nowUs()}, {"t2", nowUs()}});
                 } else if (j.value("type", "") == "keyframe") source.keyframe();
-            });
+            }, initialRate, maximumRate);
             { std::lock_guard lock(peerMutex); host = h; }
             viewer = Peer::create(false, config, [&](EncodedFrame frame) { player.push(std::move(frame)); }, [&](Json j) {
                 if (j.value("type", "") == "pong") j["t3"] = nowUs(); player.control(j);
@@ -131,6 +134,8 @@ int main(int argc, char** argv) {
         require(stats.at("videoChecksum").get<uint64_t>() != 0, "Decoded content checksum is empty");
         require(stats.at("maxAvDriftUs").get<int64_t>() <= 60000, "A/V scheduling drift exceeded 60ms");
         if (impair) { require(impairment->dropped.load() > 0 && impairment->reordered.load() > 0, "Impairment did not act on real RTP"); require(viewer->stats().at("video").at("nacks").get<uint64_t>() > 0, "No NACK feedback under loss"); }
+        if (env("PARTY_TEST_WINDOW") == "1") require(stats.at("directYuvFrames").get<uint64_t>() > 0, "Windowed streaming did not exercise YUV upload");
+        if (highQuality && !impair) require(host->targetBitrate.load() > 5000000, "High-quality negotiation fell back to legacy ceiling");
         require(source.state().stopped && !source.state().playing, "Stop did not stop source");
         std::cout << Json{{"test", "real-loopback"}, {"deferredIce",deferredIce}, {"duplicateSdpApplications",duplicateSdp}, {"durationUs", nowUs()-start}, {"impaired", impair}, {"injectedDrops", impairment ? impairment->dropped.load() : 0}, {"injectedReordering", impairment ? impairment->reordered.load() : 0}, {"source", source.stats()}, {"host", host->stats()}, {"viewer", viewer->stats()}, {"player", stats}}.dump(2) << '\n';
         source.pause(); host->close(); viewer->close();

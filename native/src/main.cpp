@@ -45,14 +45,15 @@ int runParty(int argc, char** argv) {
     using namespace party;
     std::cout.setf(std::ios::unitbuf);
     try {
-        if (argc < 2) throw std::invalid_argument("Usage: party host --file movie.mp4 [--room ID] | party viewer --room ID --invite CODE [--headless] [--preview]");
+        if (argc < 2) throw std::invalid_argument("Usage: party host --file movie.mp4 [--room ID] | party viewer --room ID --invite CODE [--headless] [--preview] [--quality balanced|high|data-saver]");
         const bool host = std::string(argv[1]) == "host";
         if (!host && std::string(argv[1]) != "viewer") throw std::invalid_argument("Choose host or viewer");
-        std::string file, roomId, invite; bool headless = false, hardware = true, preview = false;
+        std::string file, roomId, invite, quality = "balanced"; bool headless = false, hardware = true, preview = false;
         for (int i = 2; i < argc; ++i) {
             const std::string arg = argv[i];
             if (arg == "--headless") headless = true;
             else if (arg == "--preview") preview = true;
+            else if (i+1 < argc && arg == "--quality") quality = argv[++i];
             else if (arg == "--software") hardware = false;
             else if (i+1 < argc && arg == "--file") file = argv[++i];
             else if (i+1 < argc && arg == "--room") roomId = argv[++i];
@@ -61,11 +62,19 @@ int runParty(int argc, char** argv) {
         }
         if (host && file.empty()) throw std::invalid_argument("Host needs --file");
         if (!host && roomId.empty()) throw std::invalid_argument("Viewer needs --room");
+        MediaOptions media;
+        media.hardware = hardware;
+        if (quality == "balanced") { media.bitrate = 4000000; media.maxBitrate = 8000000; }
+        else if (quality == "high") { media.bitrate = 6000000; media.maxBitrate = 12000000; }
+        else if (quality == "data-saver") { media.width = 1280; media.height = 720; media.bitrate = 1500000; media.maxBitrate = 3000000; }
+        else throw std::invalid_argument("Quality must be balanced, high, or data-saver");
         rtc::InitLogger(rtc::LogLevel::Warning);
+        const auto setupStarted = nowUs();
         const auto ice = iceConfigFromEnvironment();
         auto api = std::make_unique<AppwriteApi>();
         const auto room = roomId.empty() ? api->request("POST", "/v1/rooms", {{"title", "C++ movie night"}})
             : api->request("POST", "/v1/rooms/"+roomId+"/join", {{"inviteCode", invite}});
+        const auto roomReadyMs = (nowUs()-setupStarted)/1000;
         if ((room.at("yourRole") == "host") != host) throw std::runtime_error("Room role does not match application mode");
         std::cout << "Room: " << room.at("roomId").get<std::string>() << '\n';
         if (room.contains("inviteCode")) std::cout << "Invite (share privately): " << room.at("inviteCode").get<std::string>() << '\n';
@@ -86,12 +95,14 @@ int runParty(int argc, char** argv) {
         signaling.start(); // Also leaves/closes the room if media/device initialization fails.
         if (!host || preview) player = std::make_unique<Player>(headless);
         if (host && player) { const auto time = nowUs(); player->clock.sample(time,time,time,time); }
-        if (host) source = std::make_unique<MediaSource>(file, MediaOptions{1920,1080,hardware,2500000}, [&](EncodedFrame frame) {
+        if (host) source = std::make_unique<MediaSource>(file, media, [&](EncodedFrame frame) {
             std::shared_ptr<Peer> current; { std::lock_guard lock(peerMutex); current = peer; }
             if (player) player->push(frame);
             if (current) current->send(frame);
         });
+        const auto mediaReadyMs = (nowUs()-setupStarted)/1000;
         auto createPeer = [&] {
+            signaling.connecting(true);
             return Peer::create(host, ice, [&](EncodedFrame frame) { if (player) player->push(std::move(frame)); }, [&](Json message) {
                 const auto type = message.value("type", "");
                 if (host) {
@@ -106,7 +117,7 @@ int runParty(int argc, char** argv) {
                     if (type == "pong") message["t3"] = nowUs();
                     player->control(message);
                 }
-            });
+            }, media.bitrate, media.maxBitrate);
         };
         std::signal(SIGINT, interrupt); std::signal(SIGTERM, interrupt);
         std::cout << (host ? "Commands: play, pause, seek SECONDS, stop, stats, quit\n" : "Commands: stats, quit\n");
@@ -185,6 +196,8 @@ int runParty(int argc, char** argv) {
                 peer->pump();
                 for (const auto& message : peer->takeSignals()) signaling.send(remoteUser, generation, message);
                 const bool connected = peer->connected();
+                if (connected && !wasConnected) signaling.connecting(false);
+                if (!connected && wasConnected) signaling.connecting(true);
                 if (host && connected && !wasConnected) {
                     source->seek(source->state().movieUs); if (wantsPlay) source->play(); source->keyframe(); disconnectedSince = 0;
                 }
@@ -222,7 +235,7 @@ int runParty(int argc, char** argv) {
                 } else if (*line == "stats") lastStats = 0;
             }
             if (nowUs()-lastStats > 5000000) {
-                Json stats;stats["coordinationHealthy"]=signaling.leaseHealthy();stats["coordinationActive"]=coordinationActive;stats["authorizing"]=!authorizing.empty(); if (peer) {stats["network"] = peer->stats();stats["connectionGeneration"]=generation;} if (source) stats["media"] = source->stats(); if (player) stats["player"] = player->stats();
+                Json stats; stats["roomReadyMs"]=roomReadyMs; stats["mediaReadyMs"]=mediaReadyMs; stats["coordinationHealthy"]=signaling.leaseHealthy();stats["coordinationActive"]=coordinationActive;stats["authorizing"]=!authorizing.empty(); if (peer) {stats["network"] = peer->stats();stats["connectionGeneration"]=generation;} if (source) stats["media"] = source->stats(); if (player) stats["player"] = player->stats();
                 std::cout << stats.dump() << '\n'; lastStats = nowUs();
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(2));

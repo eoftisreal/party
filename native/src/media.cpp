@@ -58,9 +58,13 @@ struct MediaSource::Impl {
     std::jthread thread;
     std::atomic<bool> forceKeyframe{true};
     std::atomic<unsigned> targetRate;
+    std::atomic<unsigned> activeBitrate{0}, encoderOpens{0};
     std::atomic<uint64_t> videoFrames{0}, audioFrames{0}, encodedBytes{0};
     Impl(const std::string& path, MediaOptions opts, std::function<void(EncodedFrame)> callback)
         : options(opts), sink(std::move(callback)), targetRate(opts.bitrate) {
+        BitrateController validate(options.bitrate, options.maxBitrate);
+        if (options.width < 2 || options.width > 1920 || options.height < 2 || options.height > 1080)
+            throw std::invalid_argument("Media dimensions must fit 1920x1080");
         AVFormatContext* raw = nullptr;
         // Explicitly local files only: input protocols cannot turn the prototype into a remote fetch service.
         AVDictionary* dict = nullptr;
@@ -120,6 +124,7 @@ struct MediaSource::Impl {
         }
         if (!selected) throw std::runtime_error("No usable H264 encoder (FFmpeg build needs libx264 fallback)");
         videoEncoder = std::move(selected);
+        activeBitrate = unsigned(videoEncoder->bit_rate); ++encoderOpens;
         videoFrame = newFrame(); videoFrame->format = videoEncoder->pix_fmt; videoFrame->width = options.width; videoFrame->height = options.height;
         check(av_frame_get_buffer(videoFrame.get(), 32), "video encode buffer");
         forceKeyframe = true;
@@ -195,7 +200,13 @@ struct MediaSource::Impl {
         if (movieUs < minMovieUs || movieUs < 0 || (lastVideoUs >= 0 && movieUs - lastVideoUs < 30000)) return;
         if (!pace(movieUs, token)) return;
         // Re-open to actually apply bitrate changes; many hardware encoders ignore live AVCodecContext writes.
-        if (targetRate != unsigned(videoEncoder->bit_rate) && nowUs() - lastRateChangeUs > 5000000) { openVideoEncoder(); lastRateChangeUs = nowUs(); }
+        const auto requestedRate = targetRate.load();
+        const auto activeRate = unsigned(videoEncoder->bit_rate);
+        // Apply meaningful reductions quickly; coalesce small increases to avoid IDR/reopen churn.
+        const bool reduce = requestedRate < activeRate && activeRate - requestedRate >= activeRate / 10;
+        const bool increase = requestedRate > activeRate && requestedRate - activeRate >= activeRate / 5;
+        if ((reduce && nowUs() - lastRateChangeUs > 1000000) ||
+            (increase && nowUs() - lastRateChangeUs > 5000000)) { openVideoEncoder(); lastRateChangeUs = nowUs(); }
         check(av_frame_make_writable(videoFrame.get()), "writable video buffer");
         scaler = sws_getCachedContext(scaler, frame->width, frame->height, AVPixelFormat(frame->format), options.width, options.height, videoEncoder->pix_fmt, SWS_BILINEAR, nullptr, nullptr, nullptr);
         if (!scaler) throw std::runtime_error("Video scaler allocation failed");
@@ -286,7 +297,7 @@ void MediaSource::seek(int64_t us) {
 }
 void MediaSource::stop() { std::lock_guard lock(impl_->mutex); impl_->wantedSeek = 0; impl_->wantedPlaying = false; impl_->stopped = true; ++impl_->commandVersion; impl_->cv.notify_all(); }
 void MediaSource::keyframe() { impl_->forceKeyframe = true; }
-void MediaSource::bitrate(unsigned rate) { impl_->targetRate = std::clamp(rate, 300000u, 5000000u); }
+void MediaSource::bitrate(unsigned rate) { impl_->targetRate = std::clamp(rate, 300000u, impl_->options.maxBitrate); }
 PlaybackState MediaSource::state() const {
     std::lock_guard lock(impl_->mutex); auto state = impl_->playback; state.hostNowUs = nowUs();
     if (state.playing) state.movieUs = std::max<int64_t>(0, state.hostNowUs - impl_->transportBaseUs + impl_->movieBaseUs);
@@ -295,7 +306,7 @@ PlaybackState MediaSource::state() const {
 }
 Json MediaSource::stats() const {
     std::lock_guard lock(impl_->mutex);
-    return {{"encoder", impl_->encoderName}, {"width", impl_->options.width}, {"height", impl_->options.height}, {"videoFrames", impl_->videoFrames.load()}, {"audioPackets", impl_->audioFrames.load()}, {"encodedBytes", impl_->encodedBytes.load()}, {"bitrate", impl_->targetRate.load()}};
+    return {{"encoder", impl_->encoderName}, {"width", impl_->options.width}, {"height", impl_->options.height}, {"videoFrames", impl_->videoFrames.load()}, {"audioPackets", impl_->audioFrames.load()}, {"encodedBytes", impl_->encodedBytes.load()}, {"bitrate", impl_->targetRate.load()}, {"activeBitrate", impl_->activeBitrate.load()}, {"encoderOpens", impl_->encoderOpens.load()}, {"maxBitrate", impl_->options.maxBitrate}};
 }
 std::string MediaSource::error() const { std::lock_guard lock(impl_->mutex); return impl_->failure; }
 }

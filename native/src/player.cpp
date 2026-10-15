@@ -47,11 +47,15 @@ struct Player::Impl {
     SDL_Renderer* renderer = nullptr;
     SDL_Texture* texture = nullptr;
     int textureWidth = 0, textureHeight = 0;
+    uint32_t textureFormat = 0;
+    bool yuvTexturesSupported = true;
+    std::vector<uint8_t> rgba;
     mutable std::mutex mutex;
     std::deque<EncodedFrame> incoming;
     std::deque<Json> controls;
     std::deque<int64_t> outstandingPings;
     size_t incomingBytes = 0;
+    PlayoutBudget playout;
     struct Video { Frame frame; int64_t pts; };
     struct Audio { std::vector<float> pcm; int64_t pts; };
     std::deque<Video> videos;
@@ -61,10 +65,10 @@ struct Player::Impl {
     std::atomic<bool> requestKeyframe{true};
     int64_t audioEndUs = 0, lastAudioPacketUs = 0, lastMediaUs = 0;
     uint64_t decodedVideo = 0, decodedAudio = 0, renderedVideo = 0, droppedVideo = 0, droppedAudio = 0, rebufferings = 0, decodeErrors = 0, concealedSamples = 0;
-    int64_t avDriftUs = 0, maxAvDriftUs = 0;
-    uint64_t videoChecksum = 0;
+    int64_t avDriftUs = 0, maxAvDriftUs = 0, resetUs = nowUs(), firstVideoUs = 0;
+    uint64_t videoChecksum = 0, directYuvFrames = 0;
     double decodedAudioEnergy = 0;
-    static constexpr int64_t bufferUs = 350000;
+    int64_t bufferUs = 350000;
     Impl(Player& player, bool hidden) : owner(player), headless(hidden) {
         SDL_SetMainReady(); // Custom main / SDL_MAIN_HANDLED, including MSVC console applications.
         if (SDL_Init(SDL_INIT_AUDIO | (hidden ? 0 : SDL_INIT_VIDEO)) != 0) throw std::runtime_error(SDL_GetError());
@@ -119,9 +123,10 @@ struct Player::Impl {
             const auto pts = output->pts == AV_NOPTS_VALUE ? encoded.transportUs : output->pts;
             if (encoded.video) {
                 if (output->width > 1920 || output->height > 1080 || output->width <= 0 || output->height <= 0) throw std::runtime_error("Unexpected receive dimensions");
-                if (videos.size() >= 15) { videos.pop_front(); ++droppedVideo; }
+                if (videos.size() >= 24) { videos.pop_front(); ++droppedVideo; }
                 Frame clone(av_frame_clone(output.get())); if (!clone) throw std::bad_alloc();
                 videos.push_back({std::move(clone), pts}); ++decodedVideo;
+                if (!firstVideoUs) firstVideoUs = nowUs();
                 // Content-derived evidence for tests: decoded luma, never simulated frame counters.
                 for (int y = 0; y < output->height; y += 32) for (int x = 0; x < output->width; x += 32)
                     videoChecksum = videoChecksum * 131 + output->data[0][y*output->linesize[0]+x];
@@ -148,18 +153,36 @@ struct Player::Impl {
     void render(Video& v) {
         if (!headless) {
             auto* f = v.frame.get();
-            if (!texture || textureWidth != f->width || textureHeight != f->height) {
+            const bool directYuv = yuvTexturesSupported && f->format == AV_PIX_FMT_YUV420P &&
+                f->colorspace == AVCOL_SPC_BT709 && f->color_range != AVCOL_RANGE_JPEG;
+            const uint32_t wantedFormat = directYuv ? SDL_PIXELFORMAT_IYUV : SDL_PIXELFORMAT_RGBA32;
+            if (!texture || textureWidth != f->width || textureHeight != f->height || textureFormat != wantedFormat) {
                 if (texture) SDL_DestroyTexture(texture);
-                texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STREAMING, f->width, f->height);
+                textureFormat = wantedFormat;
+                texture = SDL_CreateTexture(renderer, textureFormat, SDL_TEXTUREACCESS_STREAMING, f->width, f->height);
+                if (!texture && directYuv) {
+                    yuvTexturesSupported = false; textureFormat = SDL_PIXELFORMAT_RGBA32;
+                    texture = SDL_CreateTexture(renderer, textureFormat, SDL_TEXTUREACCESS_STREAMING, f->width, f->height);
+                }
                 if (!texture) throw std::runtime_error("Viewer texture allocation failed");
                 textureWidth = f->width; textureHeight = f->height;
             }
-            std::vector<uint8_t> rgba(size_t(f->width)*f->height*4);
-            uint8_t* data = rgba.data(); const int stride = f->width*4;
-            sws = sws_getCachedContext(sws, f->width, f->height, AVPixelFormat(f->format), f->width, f->height, AV_PIX_FMT_RGBA, SWS_BILINEAR, nullptr, nullptr, nullptr);
-            if (!sws) throw std::runtime_error("Viewer scaler allocation failed");
-            sws_scale(sws, f->data, f->linesize, 0, f->height, &data, &stride);
-            SDL_UpdateTexture(texture, nullptr, rgba.data(), stride);
+            if (textureFormat == SDL_PIXELFORMAT_IYUV) {
+                // The stream is limited-range BT.709; avoid a CPU RGB conversion and staging copy.
+                SDL_SetYUVConversionMode(SDL_YUV_CONVERSION_BT709);
+                if (SDL_UpdateYUVTexture(texture, nullptr, f->data[0], f->linesize[0],
+                    f->data[1], f->linesize[1], f->data[2], f->linesize[2]) < 0)
+                    throw std::runtime_error("Viewer YUV upload failed");
+                ++directYuvFrames;
+            } else {
+                rgba.resize(size_t(f->width)*f->height*4);
+                uint8_t* data = rgba.data(); const int stride = f->width*4;
+                sws = sws_getCachedContext(sws, f->width, f->height, AVPixelFormat(f->format), f->width, f->height, AV_PIX_FMT_RGBA, SWS_BILINEAR, nullptr, nullptr, nullptr);
+                if (!sws) throw std::runtime_error("Viewer scaler allocation failed");
+                sws_scale(sws, f->data, f->linesize, 0, f->height, &data, &stride);
+                if (SDL_UpdateTexture(texture, nullptr, rgba.data(), stride) < 0)
+                    throw std::runtime_error("Viewer RGB upload failed");
+            }
             int width = 0, height = 0; SDL_GetRendererOutputSize(renderer, &width, &height);
             const double scale = std::min(double(width)/f->width, double(height)/f->height);
             SDL_Rect target{(width-int(f->width*scale))/2, (height-int(f->height*scale))/2, int(f->width*scale), int(f->height*scale)};
@@ -170,7 +193,8 @@ struct Player::Impl {
     bool tick() {
         SDL_Event e; while (SDL_PollEvent(&e)) if (e.type == SDL_QUIT) return false;
         std::deque<EncodedFrame> frames; std::deque<Json> messages;
-        { std::lock_guard lock(mutex); frames.swap(incoming); messages.swap(controls); incomingBytes = 0; }
+        { std::lock_guard lock(mutex); frames.swap(incoming); messages.swap(controls); incomingBytes = 0;
+          if (buffering) bufferUs = playout.targetUs(); }
         for (const auto& j : messages) {
             try {
                 const auto type = j.value("type", "");
@@ -252,6 +276,8 @@ Player::~Player() = default;
 void Player::push(EncodedFrame frame) {
     std::lock_guard lock(impl_->mutex);
     if (frame.data.size() > 4*1024*1024 || impl_->incomingBytes + frame.data.size() > 8*1024*1024 || impl_->incoming.size() >= 256) { impl_->requestKeyframe = true; return; }
+    // Reject stale epochs before they can bias the arrival estimator.
+    if (!frame.video && frame.transportUs >= cutoffUs.load()) impl_->playout.observe(nowUs(), frame.transportUs);
     impl_->incomingBytes += frame.data.size(); impl_->incoming.push_back(std::move(frame));
 }
 void Player::control(const Json& message) {
@@ -263,18 +289,19 @@ Json Player::ping() {
     impl_->outstandingPings.push_back(time); return {{"type", "ping"}, {"t0", time}};
 }
 void Player::reset() {
-    { std::lock_guard lock(impl_->mutex); impl_->incoming.clear(); impl_->controls.clear(); impl_->outstandingPings.clear(); impl_->incomingBytes = 0; }
+    { std::lock_guard lock(impl_->mutex); impl_->incoming.clear(); impl_->controls.clear(); impl_->outstandingPings.clear(); impl_->incomingBytes = 0; impl_->playout.reset(); }
+    impl_->resetUs = nowUs(); impl_->firstVideoUs = 0;
     impl_->flush(); impl_->haveState = false; hostAnchorUs = 0; cutoffUs=0; clock.reset();
 }
 bool Player::tick() { return impl_->tick(); }
 bool Player::needsKeyframe() { return impl_->requestKeyframe.exchange(false); }
 Json Player::stats() const {
-    return {{"decodedVideoFrames", impl_->decodedVideo}, {"decodedAudioPackets", impl_->decodedAudio}, {"renderedVideoFrames", impl_->renderedVideo},
+    return {{"directYuvFrames", impl_->directYuvFrames}, {"decodedVideoFrames", impl_->decodedVideo}, {"decodedAudioPackets", impl_->decodedAudio}, {"renderedVideoFrames", impl_->renderedVideo},
         {"droppedVideoFrames", impl_->droppedVideo}, {"droppedAudioPackets",impl_->droppedAudio}, {"rebufferings", impl_->rebufferings}, {"decodeErrors", impl_->decodeErrors}, {"concealedSamples", impl_->concealedSamples},
         {"audioEnergy", impl_->decodedAudioEnergy}, {"videoChecksum", impl_->videoChecksum}, {"avDriftUs", impl_->avDriftUs}, {"maxAvDriftUs", impl_->maxAvDriftUs}, {"audioQueuedBytes", SDL_GetQueuedAudioSize(impl_->device)},
         {"audioClockUs", impl_->audioClock()}, {"audioEndUs",impl_->audioEndUs},
         {"videoFrontUs",impl_->videos.empty()?0:impl_->videos.front().pts},{"audioFrontUs",impl_->audios.empty()?0:impl_->audios.front().pts},
         {"playbackCutoffUs",impl_->state.cutoffUs},{"playing",impl_->state.playing},{"hostAnchorUs",hostAnchorUs.load()},
-        {"buffering", impl_->buffering}, {"clockOffsetUs", clock.offsetUs()}, {"clockRttUs", clock.rttUs()}, {"epoch", impl_->state.epoch}, {"movieUs", impl_->state.movieUs}};
+        {"firstVideoMs", impl_->firstVideoUs ? (impl_->firstVideoUs-impl_->resetUs)/1000 : -1}, {"playoutDelayUs", impl_->bufferUs}, {"buffering", impl_->buffering}, {"clockOffsetUs", clock.offsetUs()}, {"clockRttUs", clock.rttUs()}, {"epoch", impl_->state.epoch}, {"movieUs", impl_->state.movieUs}};
 }
 }

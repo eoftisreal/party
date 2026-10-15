@@ -49,12 +49,24 @@ struct NetworkStats {
     std::atomic<int64_t> jitterUs{0};
     Json json() const;
 };
+// Arrival variation measured on audio timestamps; caller serializes access.
+class PlayoutBudget {
+public:
+    void observe(int64_t arrivalUs, int64_t presentationUs);
+    int64_t targetUs() const;
+    void reset();
+private:
+    int64_t arrival_ = 0, presentation_ = 0, variation_ = 0;
+    bool ready_ = false;
+};
 class BitrateController {
 public:
+    explicit BitrateController(unsigned initial = 2500000, unsigned maximum = 5000000);
     unsigned update(double loss, int64_t jitterUs, int64_t queueUs);
     unsigned bitrate() const { return bitrate_; }
 private:
     unsigned bitrate_ = 2500000;
+    unsigned maximum_ = 5000000;
     unsigned clean_ = 0;
 };
 }

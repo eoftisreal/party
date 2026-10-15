@@ -31,6 +31,9 @@ jobs:
       - run: python3 tools/generate_media.py /tmp/party-test.mp4
       - run: python3 tools/run_loopback.py build/linux-asan-ubsan/party_loopback /tmp/party-test.mp4
       - run: python3 tools/run_loopback.py build/linux-asan-ubsan/party_loopback /tmp/party-test.mp4 --impair
+      - run: python3 tools/run_loopback.py build/linux-asan-ubsan/party_loopback /tmp/party-test.mp4 --window
+        env:
+          PARTY_TEST_HIGH_QUALITY: "1"
       - run: python3 tools/generate_media.py /tmp/party-raw.mp4 --raw
       - run: python3 tools/run_loopback.py build/linux-asan-ubsan/party_loopback /tmp/party-raw.mp4
       - uses: actions/setup-node@v4

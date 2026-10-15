@@ -47,10 +47,27 @@ int64_t unwrapTimestamp(uint32_t timestamp, uint32_t rate, int64_t anchorUs) {
     return anchorUs + static_cast<int64_t>(delta) * 1000000 / rate;
 }
 Json NetworkStats::json() const { return {{"rtpPackets", received.load()}, {"lost", lost.load()}, {"duplicates", duplicates.load()}, {"nacks", nacks.load()}, {"malformed", malformed.load()}, {"frames", frames.load()}, {"jitterUs", jitterUs.load()}}; }
+void PlayoutBudget::observe(int64_t arrival, int64_t presentation) {
+    if (ready_ && presentation > presentation_ && arrival >= arrival_) {
+        const auto elapsed = arrival - arrival_, media = presentation - presentation_;
+        // Ignore discontinuities, pauses and duplicate/reordered timestamps.
+        if (elapsed < 1000000 && media < 1000000) {
+            const auto delta = std::min<int64_t>(250000, std::abs(elapsed - media));
+            variation_ += (delta - variation_) / 16;
+        }
+    }
+    if (!ready_ || presentation > presentation_) { arrival_ = arrival; presentation_ = presentation; ready_ = true; }
+}
+int64_t PlayoutBudget::targetUs() const { return std::clamp<int64_t>(350000 + 4 * variation_, 350000, 600000); }
+void PlayoutBudget::reset() { arrival_ = presentation_ = variation_ = 0; ready_ = false; }
+BitrateController::BitrateController(unsigned initial, unsigned maximum) : bitrate_(initial), maximum_(maximum) {
+    if (initial < 300000 || initial > maximum || maximum > 12000000)
+        throw std::invalid_argument("Bitrate must satisfy 300000 <= initial <= maximum <= 12000000");
+}
 unsigned BitrateController::update(double loss, int64_t jitter, int64_t queue) {
     if (!std::isfinite(loss) || loss < 0 || loss > 1) return bitrate_;
     if (loss > .02 || jitter > 60000 || queue > 400000) { bitrate_ = std::max(300000u, bitrate_ * 3 / 4); clean_ = 0; }
-    else if (++clean_ >= 3) { bitrate_ = std::min(5000000u, bitrate_ + 150000); clean_ = 0; }
+    else if (++clean_ >= 3) { bitrate_ = std::min(maximum_, bitrate_ + std::max(150000u, bitrate_ / 10)); clean_ = 0; }
     return bitrate_;
 }
 }

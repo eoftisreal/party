@@ -1,4 +1,5 @@
 #include "party/rtp.hpp"
+#include "party/transport.hpp"
 #include <iostream>
 #include <stdexcept>
 namespace {
@@ -83,6 +84,18 @@ int main() {
         expect(nackWire[12]==0xff && nackWire[13]==0xfb && nackWire[14]==0xff && nackWire[15]==0xff,
             "NACK PID/BLP wire format failed across sequence wrap");
         expect(nackReceiver.stats->nacks==17, "NACK packet request count changed");
+        // A 12 Mbps sender must not be capped at 4800 bytes per 5ms pump.
+        std::atomic<unsigned> pacingRate{12000000}; std::atomic<bool> keyframe{false};
+        BoundedPacer pacer(pacingRate,keyframe); size_t transmitted=0;
+        rtc::message_vector burst;
+        for (int i=0;i<100;++i) burst.push_back(rtc::make_message(1000,rtc::Message::Binary));
+        pacer.outgoing(burst,[&](auto packet){transmitted+=packet->size();});
+        pacer.pump(1000000); transmitted=0;
+        pacer.pump(1005000);
+        expect(transmitted>=8000 && transmitted<=10000,"Pacer cannot sustain high bitrate at 5ms cadence");
+        transmitted=0; pacer.pump(2000000);
+        expect(transmitted<=18000,"Pacer emitted unbounded catch-up burst");
+        pacer.clear(); expect(pacer.queueUs()==0,"Pacer clear retained old media");
         PacketGuard guard; rtc::message_vector bad{rtc::make_message(4,rtc::Message::Control)};
         guard.incoming(bad,[](auto){}); expect(bad.empty(),"Truncated RTCP passed guard");
         std::cout << "RTP reorder, loss, wrap and hostile-payload checks passed\n";

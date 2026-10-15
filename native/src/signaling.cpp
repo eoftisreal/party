@@ -15,8 +15,10 @@ size_t writeBody(char* ptr, size_t size, size_t count, void* userdata) {
 Json http(const std::string& url, const std::string& method, const Json& data, const std::vector<std::string>& headers) {
     static const int initialized = [] { if (curl_global_init(CURL_GLOBAL_DEFAULT) != CURLE_OK) throw std::runtime_error("curl initialization failed"); return 1; }(); (void)initialized;
     using Curl = std::unique_ptr<CURL, decltype(&curl_easy_cleanup)>;
-    Curl curl(curl_easy_init(), curl_easy_cleanup);
+    thread_local Curl curl(curl_easy_init(), curl_easy_cleanup);
     if (!curl) throw std::runtime_error("curl allocation failed");
+    curl_easy_reset(curl.get()); // Retains connection/DNS/TLS caches; removes prior headers and body.
+    curl_easy_setopt(curl.get(), CURLOPT_TCP_KEEPALIVE, 1L);
     curl_slist* list = nullptr;
     for (const auto& h : headers) list = curl_slist_append(list, h.c_str());
     list = curl_slist_append(list, "Content-Type: application/json");
@@ -86,7 +88,8 @@ Signaling::Signaling(std::unique_ptr<AppwriteApi> api, Json room, bool host) : a
     request_=[this](const auto& method,const auto& path,const auto& data){return api_->request(method,path,data);};
 }
 Signaling::~Signaling() { stop(); }
-void Signaling::start() { if(worker_.joinable()) throw std::logic_error("Signaling already started"); leaseDeadlineUs_=nowUs()+options_.leaseUs*5/6; worker_ = std::jthread([this](std::stop_token token) { run(token); }); }
+void Signaling::connecting(bool active) { fastPollUntilUs_ = active ? nowUs() + 35000000 : 0; }
+void Signaling::start() { connecting(true); if(worker_.joinable()) throw std::logic_error("Signaling already started"); leaseDeadlineUs_=nowUs()+options_.leaseUs*5/6; worker_ = std::jthread([this](std::stop_token token) { run(token); }); }
 void Signaling::send(const std::string& to, const std::string& generation, const Json& message) {
     Json input = message; input["to"] = to; input["generation"] = generation; input["messageId"] = randomId();
     std::lock_guard lock(mutex_);
@@ -222,8 +225,10 @@ void Signaling::run(std::stop_token stop) {
                     }
                 } catch(const std::exception&) {retryCommand();}
             }
-            if(now-lastRoom>=options_.pollUs) {snapshot(request("GET",""));lastRoom=now;}
-            if(now-lastPoll>=options_.pollUs || wake_->exchange(false)) {
+            const auto pollUs = now < fastPollUntilUs_.load() ? std::min<int64_t>(options_.pollUs, 250000) : options_.pollUs;
+            if(now-lastRoom>=pollUs) {snapshot(request("GET",""));lastRoom=now;}
+            const bool notified = wake_->exchange(false);
+            if(now-lastPoll>=pollUs || notified) {
                 const auto inbox=request("GET","/signals");
                 // Refresh authority before accepting a newly observed generation.
                 bool refresh=false;

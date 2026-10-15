@@ -27,6 +27,20 @@ int main() {
         expect(rate.bitrate() == 300000, "bitrate floor");
         for (int i=0; i<200; ++i) rate.update(0,0,0);
         expect(rate.bitrate() == 5000000, "bitrate ceiling");
+        BitrateController high(6000000, 12000000);
+        for (int i=0; i<60; ++i) high.update(0,0,0);
+        expect(high.bitrate() == 12000000, "high quality ceiling");
+        expect(high.update(.1,0,0) == 9000000, "high quality still backs off on loss");
+        bool invalidRate = false;
+        try { BitrateController invalid(6000000, 5000000); } catch (const std::invalid_argument&) { invalidRate = true; }
+        expect(invalidRate, "invalid bitrate configuration accepted");
+        PlayoutBudget budget;
+        for (int64_t i=0; i<100; ++i) budget.observe(i*20000, i*20000);
+        expect(budget.targetUs() == 350000, "steady arrivals unnecessarily inflate latency");
+        int64_t arrival=2000000, pts=2000000;
+        for (int i=0; i<100; ++i) { arrival+=200000; pts+=20000; budget.observe(arrival,pts); }
+        expect(budget.targetUs() == 600000, "jitter budget not bounded/adaptive");
+        budget.reset(); expect(budget.targetUs() == 350000, "playout reset retained old jitter");
         std::vector<uint8_t> packet{0x80,0xe0,0xff,0xfe,0,0,0,7,0,0,0,1,0x65,0x11};
         auto parsed = parseRtp(packet); expect(parsed && parsed->sequence == 65534 && parsed->marker && parsed->payload.size()==2, "RTP header parsing");
         packet[0] = 0x90; expect(!parseRtp(packet), "truncated extension rejected");
