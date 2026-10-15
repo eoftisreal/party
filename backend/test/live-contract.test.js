@@ -6,7 +6,7 @@ import { appwriteOperation, safeDiagnostic, logDiagnostic } from '../src/diagnos
 
 // SDK requests are real; authentication/storage are offline contract fixtures.
 // The transaction TTL validation matches Appwrite's tagged 2.4.0 source.
-async function execution({ failAt, code = 400, type = 'document_invalid_structure', rollbackFails = false, createLimitPerHour } = {}) {
+async function execution({ failAt, code = 400, type = 'document_invalid_structure', rollbackFails = false, createLimitPerHour, guest = false } = {}) {
   const original = Client.prototype.call;
   const oldEnv = {...process.env};
   const calls = [], logs = [], persisted = new Map(), transactions = new Map();
@@ -61,7 +61,7 @@ async function execution({ failAt, code = 400, type = 'document_invalid_structur
     documents.set(key,document);return structuredClone(document);
   };
   try {
-    await main({req:{method:'POST',path:'/v1/rooms',headers:{authorization:'Bearer test-jwt','x-appwrite-key':secret},bodyJson:{title:'Movie night'}},
+    await main({req:{method:'POST',path:'/v1/rooms',headers:{authorization:guest?'Bearer guest_'+'a'.repeat(64):'Bearer test-jwt','x-appwrite-key':secret},bodyJson:{title:'Movie night'}},
       res:{json:(body,status)=>{response={body,status};return response;}},error:line=>logs.push(line)});
     return {response,calls,logs,persisted,transactions,secret};
   } finally {
@@ -123,4 +123,11 @@ test('diagnostics reject unknown types/names and preserve the original error', a
   assert.equal(diagnostic.errorType,'unknown');assert.equal(diagnostic.errorName,'Error');
   assert.ok(!JSON.stringify(diagnostic).includes('secret-password'));
   assert.doesNotThrow(()=>logDiagnostic(()=>{throw Error('logger failed');},error));
+});
+
+test('guest creation uses real SDK storage without any Appwrite Account request',async()=>{
+  const {response,calls,persisted}=await execution({guest:true});
+  assert.equal(response.status,201);assert.match(response.body.hostId,/^g_[a-f0-9]{32}$/);
+  assert.equal(calls.some(c=>c.path==='/v1/account'),false);
+  assert.equal(persisted.get('rooms:'+response.body.roomId).hostId,response.body.hostId);
 });

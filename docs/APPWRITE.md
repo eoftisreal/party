@@ -41,19 +41,19 @@ Appwrite transaction limits vary by plan; the room queue is capped at 64 and nor
 
 ## Function configuration
 
-Create a Node.js 22 Function, root `backend`, entrypoint `src/main.js`, build command `npm ci --omit=dev`. Enable a Function HTTPS domain. The domain API verifies `Authorization: Bearer <Appwrite JWT>` independently of Appwrite's injected user identity. The HTTPS domain must accept requests so JWT authentication can execute; never trust a caller-provided user ID.
+Create a Node.js 22 Function, root `backend`, entrypoint `src/main.js`, build command `npm ci --omit=dev`. Enable a Function HTTPS domain. The domain API accepts temporary guest bearer tokens and verifies optional legacy Appwrite JWTs independently of Appwrite's injected user identity. `POST /v1/guest` issues an account-free credential; see [guest sessions](GUEST_SESSIONS.md). The HTTPS domain must accept requests so JWT authentication can execute; never trust a caller-provided user ID.
 
 Set `PARTY_DATABASE_ID=party-v2`. During development, the per-account hosting limit is disabled by default. Set `PARTY_CREATE_LIMIT_PER_HOUR=4` (or another positive integer up to 10000) before public launch to restore the cap; setting it to `0` disables the cap. The `limits` collection remains required for invitation-join abuse protection and optional hosting limits. Collection IDs default to the names above and can be overridden using the variables in `backend/.env.example`. Appwrite injects its endpoint, project and scoped runtime API key; never pass that runtime key to a host/viewer.
 
 For the legacy document API, enable `documents.read` and `documents.write` in the Function's dynamic API key scopes. This is the deprecated Databases/collections compatibility API for TablesDB, not the newer schemaless DocumentsDB service. Current consoles may expose equivalent rows.read/rows.write scopes: use the scope names presented for the **legacy `/databases` API**, then run `tools/smoke.js` to verify actual permissions. The schema setup key needs additional collection/attribute/index scopes; the deployed Function does not change schemas.
 
-Set a five-minute schedule for expiry/notification cleanup. Appwrite's platform-controlled `x-appwrite-trigger=schedule` invokes housekeeping; there is no public cleanup route. Closed rooms, memberships and peer records are removed one day after the original room expiry (rooms last 24 hours). Expired signaling receipts are removed after 120 seconds. Per-user abuse counters retain one private document/account; an administrative account-retention policy remains necessary at large scale. The setup script and scheduled cleanup have not been run against a live project in this development environment.
+Set a five-minute schedule for expiry/notification cleanup. Appwrite's platform-controlled `x-appwrite-trigger=schedule` invokes housekeeping; there is no public cleanup route. Closed rooms, memberships and peer records are removed one day after the original room expiry (host activity extends room expiry to 30 minutes after its latest heartbeat or rejoin). Expired signaling receipts are removed after 120 seconds. Per-user abuse counters retain one private document/account; an administrative account-retention policy remains necessary at large scale. The setup script and scheduled cleanup have not been run against a live project in this development environment.
 
 The client uses short Function requests; it does not hold an execution open as a WebSocket. Signaling stores and transmits no movie content. Polling plus transaction reads/writes still consumes Function/database quota. Measure usage on your actual student plan; free media transport does not make coordination or TURN unlimited.
 
 ## API
 
-All paths except `/health` require an Appwrite user JWT. Streaming-sensitive endpoints also require `X-Party-Session`, returned by create/join. Rejoining rotates this session and revokes the old generation.
+`POST /v1/guest` and `GET /health` need no credentials. All room paths require a guest bearer token or an optional legacy Appwrite user JWT. Streaming-sensitive endpoints also require `X-Party-Session`, returned by create/join. Rejoining rotates this session and revokes the old generation.
 
 | Method/path | Body/behavior |
 | --- | --- |
@@ -70,9 +70,12 @@ All paths except `/health` require an Appwrite user JWT. Streaming-sensitive end
 
 Offer/answer payload is `{ "sdp": "..." }`; candidate payload is `{ "candidate": "candidate:...", "mid": "video" }`; disconnect payload is `{}`. MessageId/generation are 32 hex characters. SDP must advertise encrypted H.264 PT96 and Opus PT111, with host-sendonly/viewer-recvonly directions, ICE and SHA-256 DTLS fingerprint. Invitations are private bearer secrets. Native retries preserve messageId; a receipt survives ACK deletion until the 120-second TTL so lost HTTP responses do not replay an already applied offer. Reusing an identifier with different content is rejected. A new negotiation requires a fresh generation. The host preserves requestId across authorization retries, including restart=true, preventing lost responses from rotating the generation twice. Native inbox messages are ACKed only after successful application; candidates arriving before SDP remain pending. Superseded generations are deliberately discarded and ACKed after consulting the room snapshot.
 
-## User authentication and Realtime
+## Guest sessions, optional user authentication and Realtime
 
-An existing player login integration can refresh a JWT file and set `PARTY_JWT_FILE`. A one-off `PARTY_JWT` also works but expires; JWTs normally last 15 minutes. For continuous native sessions, set the **user's** `PARTY_SESSION_SECRET`, endpoint and project. The native client requests `/account/jwts` using `X-Appwrite-Session` every ten minutes and keeps JWTs in memory. A Function 401 renews the JWT and retries once; revocation still fails closed. Membership lease expiration uses previousSession and a stable requestId. A lost renewal response can be retried without replacing the new session or stealing a newer instance's session; STALE_SESSION is terminal so two instances cannot repeatedly steal the same session. Coordination outages close/pause media after a conservative request-start deadline of 100 seconds without a successful heartbeat, retry for up to five minutes, and reconnect after authority is restored. Obtain the secret through your existing Appwrite login/token flow; no project API key belongs in the client.
+Guest mode is the default for new native clients with no configured account credentials. It uses private Function polling, keeps its secret in memory, and never creates an Appwrite account. Guest mode requires only the Function URL on the client; the backend still needs its existing Appwrite project/database credentials. See [guest lifecycle and integration](GUEST_SESSIONS.md). Weak connectivity preserves room membership and invite codes during the 30-minute host reconnect window. Explicit normal host shutdown attempts to close the room; crashes/offline shutdown rely on expiry.
+
+
+An existing player login integration can refresh a JWT file and set `PARTY_JWT_FILE`. A one-off `PARTY_JWT` also works but expires; JWTs normally last 15 minutes. For continuous native sessions, set the **user's** `PARTY_SESSION_SECRET`, endpoint and project. The native client requests `/account/jwts` using `X-Appwrite-Session` every ten minutes and keeps JWTs in memory. A Function 401 renews the JWT and retries once; revocation still fails closed. Membership lease expiration uses previousSession and a stable requestId. A lost renewal response can be retried without replacing the new session or stealing a newer instance's session; STALE_SESSION is terminal so two instances cannot repeatedly steal the same session. Coordination outages close/pause media after a conservative request-start deadline of 100 seconds without a successful heartbeat, retry for up to 30 minutes, and reconnect after authority is restored. Obtain the secret through your existing Appwrite login/token flow; no project API key belongs in the client.
 
 Realtime uses `wss://<endpoint>/v1/realtime?project=<project>` and current official SDK `authentication`/`subscribe` messages. Session authentication is optional. If you supply only a JWT, the prototype uses authenticated Function polling rather than placing JWTs in a WebSocket URL. If an older deployed Realtime protocol differs, polling continues, but validate the subscription on your project before claiming Realtime tested. JWT files must be updated atomically by the login integration.
 
@@ -94,7 +97,7 @@ Operations identify `transactions.create`, `transactions.commit`, `transactions.
 
 ## Live smoke
 
-Use two different users and newly generated JWTs:
+For account-free guest smoke testing, set only `PARTY_FUNCTION_URL` and leave `PARTY_HOST_JWT` and `PARTY_VIEWER_JWT` unset. Legacy testing can still use two different users and freshly generated JWTs:
 
 ```sh
 # PARTY_FUNCTION_URL, PARTY_HOST_JWT and PARTY_VIEWER_JWT in the environment

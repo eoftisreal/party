@@ -63,12 +63,21 @@ AppwriteApi::AppwriteApi() : functionUrl_(env("PARTY_FUNCTION_URL")), endpoint_(
     if (!sessionSecret_.empty()) { requireHttps(endpoint_); if (project_.empty()) throw std::invalid_argument("Appwrite project required for session auth"); }
 }
 std::string AppwriteApi::jwt() {
+    if (!guestToken_.empty()) return guestToken_;
     if (sessionSecret_.empty()) jwt_ = readJwtFile();
     else if (nowUs() >= jwtExpiryUs_) {
         jwt_ = http(endpoint_ + "/account/jwts", "POST", Json::object(), {"X-Appwrite-Project: " + project_, "X-Appwrite-Session: " + sessionSecret_}).at("jwt").get<std::string>();
         jwtExpiryUs_ = nowUs() + 600000000;
     }
-    if (jwt_.empty() || jwt_.size() > 8192 || jwt_.find_first_of("\r\n") != std::string::npos) throw std::invalid_argument("Valid PARTY_JWT(_FILE) or PARTY_SESSION_SECRET required");
+    if (jwt_.empty()) {
+        guestToken_ = http(functionUrl_ + "/v1/guest", "POST", Json::object(), {}).at("guestToken").get<std::string>();
+        if (guestToken_.size() != 70 || !guestToken_.starts_with("guest_") ||
+            guestToken_.substr(6).find_first_not_of("0123456789abcdef") != std::string::npos) {
+            guestToken_.clear(); throw std::runtime_error("Invalid guest credential response");
+        }
+        return guestToken_;
+    }
+    if (jwt_.size() > 8192 || jwt_.find_first_of("\r\n") != std::string::npos) throw std::invalid_argument("Valid PARTY_JWT(_FILE) or PARTY_SESSION_SECRET required");
     return jwt_;
 }
 Json AppwriteApi::request(const std::string& method, const std::string& path, const Json& data) {
@@ -139,7 +148,7 @@ void Signaling::run(std::stop_token stop) {
     const auto base="/v1/rooms/"+roomId();
     auto request=[&](const std::string& method,const std::string& path,const Json& data=Json::object()){return request_(method,base+path,data);};
     int64_t lastPoll=0,lastRoom=0,lastHeartbeat=0,lastRealtime=0,ackRetryAt=0,leaseRefresh=nowUs();
-    unsigned failures=0, commandFailures=0; bool suspended=false, eventOverflow=false;
+    unsigned failures=0, commandFailures=0; bool suspended=false, eventOverflow=false, terminal=false;
     int64_t commandRetryAt=0;
     std::optional<Json> renewal;
     std::string currentSession=room_.value("sessionId","");
@@ -244,17 +253,19 @@ void Signaling::run(std::stop_token stop) {
                 ++failures; // Retry own renewal before sending the old session header again.
             } else if(e.status==401 || e.status==403 || e.status==404 || e.status==410) {
                 // In particular, STALE_SESSION is terminal: never fight another instance by rejoining.
-                event({{"event","closed"},{"code",e.code}});break;
+                terminal=true;event({{"event","closed"},{"code",e.code}});break;
             } else ++failures;
         } catch(const std::exception&) {++failures;}
         const auto outage=nowUs()-leaseRefresh;
         if(outage>options_.leaseUs*5/6 && !suspended) {event({{"event","coordination-lost"}});suspended=true;}
-        if(outage>options_.recoveryUs){event({{"event","closed"},{"code","COORDINATION_UNAVAILABLE"}});break;}
+        if(outage>options_.recoveryUs){terminal=true;event({{"event","closed"},{"code","COORDINATION_UNAVAILABLE"}});break;}
         const auto delay=failures?std::min(10000u,250u*(1u<<std::min(failures,5u))):20u;
         for(unsigned slept=0;slept<delay && !stop.stop_requested();slept+=20)std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
     if(realtime_){realtime_->resetCallbacks();realtime_->close();}
-    try{request("POST","/leave");}catch(const std::exception&){}
+    // Network/auth failures must not implicitly end the host's room.
+    // Only an explicit stop (normal player close / End Party) attempts to leave.
+    if(stop.stop_requested() && !terminal && !eventOverflow) try{request("POST","/leave");}catch(const std::exception&){}
 }
 void Signaling::stop() { if (worker_.joinable()) { worker_.request_stop(); worker_.join(); } }
 }

@@ -4,7 +4,7 @@
 
 | Component | Interface | Integration point |
 | --- | --- | --- |
-| Appwrite | `AppwriteApi`, `Signaling` | Supply user session/JWT from existing login; consume room/authorized/signal/rejoined/coordination-lost/closed events |
+| Appwrite | `AppwriteApi`, `Signaling` | Set Function URL for automatic guest credentials (optional legacy session/JWT); consume room/authorized/signal/rejoined/coordination-lost/closed events |
 | Network | `Peer` | Create send-only host or receive-only viewer; process authenticated generations; feed local/remote SDP and ICE |
 | Host media | `MediaSource` | Optional standalone FFmpeg reader/encoder; replace with your existing decoded-frame encode path |
 | Viewer output | `Player` | Replace SDL rendering/audio with existing render/audio queues while retaining timing/recovery logic |

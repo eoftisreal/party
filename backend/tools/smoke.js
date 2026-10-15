@@ -1,8 +1,10 @@
-// Live coordination smoke, not a media/Realtime test. Requires two real user JWTs.
+// Live coordination smoke, not a media/Realtime test. Defaults to two temporary guests.
 import assert from 'node:assert/strict';
 import {randomBytes} from 'node:crypto';
-const base=process.env.PARTY_FUNCTION_URL,host=process.env.PARTY_HOST_JWT,viewer=process.env.PARTY_VIEWER_JWT;
-if(!base?.startsWith('https://')||!host||!viewer)throw Error('Need HTTPS PARTY_FUNCTION_URL, PARTY_HOST_JWT and PARTY_VIEWER_JWT');
+const base=process.env.PARTY_FUNCTION_URL;
+let host=process.env.PARTY_HOST_JWT,viewer=process.env.PARTY_VIEWER_JWT;
+if(!base?.startsWith('https://'))throw Error('Need HTTPS PARTY_FUNCTION_URL');
+if(Boolean(host)!==Boolean(viewer))throw Error('Supply both legacy JWTs or leave both unset for guests');
 const id=()=>randomBytes(16).toString('hex');
 // Slow Cloud requests can outlast the server's 120-second membership leases.
 // Refresh through the existing authenticated heartbeat API; do not weaken the lease.
@@ -14,7 +16,7 @@ async function request(token,method,path,body,session){
   const start=Date.now();
   console.log(`[smoke] START ${method} ${route}`);
   try {
-    const response=await fetch(base+path,{method,redirect:'error',signal:AbortSignal.timeout(15000),headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json',...(session?{'X-Party-Session':session}:{})},...(body?{body:JSON.stringify(body)}:{})});
+    const response=await fetch(base+path,{method,redirect:'error',signal:AbortSignal.timeout(15000),headers:{...(token?{Authorization:`Bearer ${token}`}:{}),'Content-Type':'application/json',...(session?{'X-Party-Session':session}:{})},...(body?{body:JSON.stringify(body)}:{})});
     const responseBody=await response.json();
     console.log(`[smoke] HTTP ${response.status} ${method} ${route} in ${Date.now()-start}ms`);
     if(response.status>=400 && /^[A-Z_]{2,48}$/.test(responseBody?.error?.code ?? ''))
@@ -44,6 +46,11 @@ function sdp(direction){return ['v=0','o=- 1 1 IN IP4 127.0.0.1','s=coordination
   'a=fingerprint:sha-256 '+Array(32).fill('AA').join(':'),
   'm=video 9 UDP/TLS/RTP/SAVPF 96','a=mid:video','a='+direction,'a=rtpmap:96 H264/90000',
   'm=audio 9 UDP/TLS/RTP/SAVPF 111','a=mid:audio','a='+direction,'a=rtpmap:111 opus/48000/2',''].join('\r\n');}
+if(!host){
+  const h=await call(null,'POST','/v1/guest',{}),v=await call(null,'POST','/v1/guest',{});
+  assert.equal(h.status,201);assert.equal(v.status,201);
+  host=h.body.guestToken;viewer=v.body.guestToken;
+}
 const created=await call(host,'POST','/v1/rooms',{title:'Live deployment smoke'});
 assert.equal(created.status,201,`Room creation returned HTTP ${created.status}; inspect this execution's party_backend_error log for operation/status/errorType. Do not share JWTs, API keys, or request bodies.`);
 const r=created.body,path='/v1/rooms/'+r.roomId;
@@ -56,7 +63,7 @@ try{
   assert.equal((await call(viewer,'GET',path)).status,403);
   assert.equal((await call(viewer,'POST',path+'/join',{inviteCode:'x'.repeat(32)})).status,403);
   const joined=await call(viewer,'POST',path+'/join',{inviteCode:r.inviteCode});assert.equal(joined.status,200);
-  const v=joined.body;assert.notEqual(v.yourUserId,r.yourUserId,'Smoke test needs two different accounts');
+  const v=joined.body;assert.notEqual(v.yourUserId,r.yourUserId,'Smoke test needs two different identities');
   viewerLease={token:viewer,session:v.sessionId,refreshedAt:Date.now()};
   leases.push(viewerLease);
   assert.equal((await call(viewer,'POST',path+'/peers',{viewerId:r.hostId},v.sessionId)).status,403);

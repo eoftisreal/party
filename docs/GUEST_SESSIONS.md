@@ -1,0 +1,28 @@
+# Account-free watch parties and reconnects
+
+New native clients automatically use guest mode when `PARTY_SESSION_SECRET`, `PARTY_JWT` and `PARTY_JWT_FILE` are unset or empty. The only required coordination setting is `PARTY_FUNCTION_URL`. No signup, Appwrite user account, or client API key is required. The Function still uses its existing Appwrite configuration and private six-collection database; this change requires no schema migration.
+
+## Protocol for the playback player
+
+1. On entering Watch Party, call `POST /v1/guest` with `{}`. Keep the returned `guestToken` only in memory for this player instance. Never share or log it. This endpoint creates no database record or Appwrite account.
+2. Send `Authorization: Bearer <guestToken>` on every room request. Host: `POST /v1/rooms` with `{title}`. Viewer: `POST /v1/rooms/:roomId/join` with `{inviteCode}`. Keep the existing room ID + invite code sharing design; a player may display them together as one invitation.
+3. Save the returned membership `sessionId` in memory and send it as `X-Party-Session`. The host and viewer have different secrets and identities. Host-only stream authorization and existing SDP/ICE validation still apply. Guest secrets are represented by hashed identities in storage, never stored in plaintext. The `g_` user ID prefix is reserved for guests.
+4. Send heartbeats every ten seconds. Missing heartbeats mark a member offline after two minutes; they do not delete the room or immediately evict the viewer. A viewer's place is reserved for 30 minutes after their last activity.
+5. A live host heartbeat or host rejoin extends `expiresAt` to 30 minutes from the server's current time. Viewer heartbeats cannot extend this host deadline. No absolute 24-hour cap remains while the host sends heartbeats.
+6. Keep retrying transient network/server failures with backoff. After `PEER_EXPIRED`, call `/join` with `previousSession` and one stable random 32-hex `requestId`. Reuse that request ID on retries, even after a lost response. Replace the membership session from the response while retaining the guest token. The invitation and room ID stay unchanged. Fresh connection generations invalidate old queued media negotiation.
+7. On explicit End Party or a normal host player close, send `/close` or `/leave` with the current credentials. These actions can terminate an offline membership whose short liveness lease has expired. A viewer leaving removes only that viewer. Do not send leave/close in response to weak connectivity, signaling errors, or recovery timeout.
+8. If the process crashes, is force-closed, or cannot send its close request, the room expires 30 minutes after the host's last successful activity. Cleanup marks it closed; request-time expiry checks reject it immediately even between cleanup runs. Closing and deleting are separate: closed records remain for diagnostics and are later pruned by scheduled cleanup.
+
+The reference `AppwriteApi` handles guest bootstrap/token reuse and `Signaling` handles renewal and retry. Its default recovery window is now 30 minutes. The reference main loop preserves the source movie position and intended play state while pausing and rebuilding media after coordination loss. A playback player integrating `party_core` must handle `coordination-lost`, `rejoined`, `coordination-restored` and room snapshots: display “Waiting for host to reconnect” when the host is offline and synchronize playback when the connection returns. The library cannot add UI to an external player repository automatically.
+
+Guest credentials live only in process memory. Restarting the player loses them and begins a new guest identity; crash recovery applies to temporary network outages while that instance remains running, not reopening the process. Video cannot keep arriving after the host loses connectivity and the viewer's buffer empties. Short outages may recover an existing connection; long outages negotiate a fresh connection. A player close during an outage cannot guarantee immediate delivery of its end request, so expiry is the fallback.
+
+## Deployment and verification
+
+Redeploy `Party-Backend` with root `backend`, entrypoint `src/main.js`, build `npm ci --omit=dev`. Keep the existing project/database settings, private collections, document scopes and scheduled cleanup. The HTTPS Function domain must allow the public guest bootstrap request to reach this application handler. Rebuild `party_core` and the player; the old client still requires its legacy login credentials. To select guest mode, unset all three legacy credential variables in the player environment.
+
+Run `npm ci && npm test && npm run check` from `backend`. For a live coordination check, set only `PARTY_FUNCTION_URL` and run `node backend/tools/smoke.js` with both `PARTY_HOST_JWT` and `PARTY_VIEWER_JWT` unset. It creates two guests, verifies authorization/signaling and closes the test room. Legacy JWT smoke testing remains available by setting both JWT variables.
+
+CI includes native signaling regression tests and a separate-process TLS/WebRTC guest run (`tools/two_process.py ... --guest --outage`), including a 102-second outage, response loss, renegotiation and verification that the native guests make zero Account/JWT requests. Offline tests do not establish live Appwrite deployment or WAN performance.
+
+Development hosting remains unlimited by default. Existing per-identity join and per-member signaling budgets remain, but guests can create fresh identities; those are not a global abuse defense. Restricting use to the official player and stronger public-service abuse controls remain deferred during development. Optional legacy Appwrite authentication is retained for existing integrations.

@@ -1,4 +1,7 @@
-import { ApiError } from './rooms.js';
+import { randomBytes } from 'node:crypto';
+import { ApiError, digest } from './rooms.js';
+// Guest secrets never enter storage; their hash is the private membership identity.
+const guestUser = token => 'g_' + digest(token).slice(0, 32);
 const route = /^\/v1\/rooms\/([a-f0-9]{32})(?:\/(join|leave|close|heartbeat|peers|signals|ack))?$/;
 function body(req) {
   if (typeof req.bodyText === 'string' && Buffer.byteLength(req.bodyText) > 65536)
@@ -17,14 +20,28 @@ export function makeHandler({ service, signaling, authenticate, logError = () =>
     try {
       const path = (req.path || '/').replace(/\/$/, '') || '/', method = (req.method || '').toUpperCase();
       if (path === '/health' && method === 'GET') return res.json({ ok: true, service: 'party-room-api', version: 2 }, 200);
+      if (path === '/v1/guest' && method === 'POST') {
+        body(req);
+        const guestToken = 'guest_' + randomBytes(32).toString('hex');
+        return res.json({ guestToken, userId: guestUser(guestToken) }, 201);
+      }
       if (path !== '/v1/rooms' && !route.test(path)) throw new ApiError(404, 'NOT_FOUND', 'Route not found');
       const auth = header(req, 'authorization');
       const token = typeof auth === 'string' && /^Bearer ([A-Za-z0-9._~-]+)$/.exec(auth)?.[1];
-      if (!token || token.length > 8192) throw new ApiError(401, 'AUTH_REQUIRED', 'Appwrite JWT required');
+      if (!token || token.length > 8192) throw new ApiError(401, 'AUTH_REQUIRED', 'Guest token or Appwrite JWT required');
       let user;
-      try { user = await authenticate(token); }
-      catch (e) { if (e.code === 401 || e.code === 403) throw new ApiError(401, 'INVALID_TOKEN', 'Invalid JWT'); throw e; }
-      if (!user) throw new ApiError(401, 'INVALID_TOKEN', 'Invalid JWT');
+      try {
+        if (token.startsWith('guest_')) {
+          if (!/^guest_[a-f0-9]{64}$/.test(token)) throw new ApiError(401, 'INVALID_TOKEN', 'Invalid guest token');
+          user = guestUser(token);
+        } else {
+          user = await authenticate(token);
+          // Reserve guest identities so a caller cannot register a matching Appwrite user ID.
+          if (typeof user === 'string' && user.startsWith('g_')) throw new ApiError(401, 'INVALID_TOKEN', 'Reserved user identity');
+        }
+      }
+      catch (e) { if (e.code === 401 || e.code === 403) throw new ApiError(401, 'INVALID_TOKEN', 'Invalid credential'); throw e; }
+      if (!user) throw new ApiError(401, 'INVALID_TOKEN', 'Invalid credential');
       if (path === '/v1/rooms' && method === 'POST') return res.json(await service.create(user, body(req)), 201);
       const [, id, action] = route.exec(path) || [], session = header(req, 'x-party-session');
       if (id && method === 'GET' && !action) return res.json(await service.read(id, user, session), 200);

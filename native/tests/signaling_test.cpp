@@ -163,6 +163,26 @@ int main(){using namespace party;try{
     const auto afterIdle=setupPolls.load(); fast.stop();
     expect(accelerated,"Connection setup still waits for idle polling interval");
     expect(beforeIdle==afterIdle,"Fast polling continued after connection");
+    expect(SignalingOptions{}.recoveryUs==1800000000LL,"Default reconnect window is not 30 minutes");
+    std::atomic<unsigned> leaves{0};
+    std::atomic<bool> temporaryOffline{true};
+    Signaling guestOutage([&](const std::string&,const std::string& path,const Json&)->Json {
+        if(path.ends_with("/leave")){++leaves;return Json::object();}
+        if(temporaryOffline)throw std::runtime_error("weak connection");
+        if(path.ends_with("/signals"))return {{"messages",Json::array()}};
+        return hostRoom;
+    },hostRoom,true,{20000,20000,100000,3000000});
+    guestOutage.start();until(guestOutage,[](const Json& e){return e.at("event")=="coordination-lost";});
+    expect(leaves==0,"A weak connection closed the host room");temporaryOffline=false;
+    until(guestOutage,[](const Json& e){return e.at("event")=="coordination-restored";});
+    guestOutage.stop();expect(leaves==1,"Explicit shutdown did not leave the room");
+    leaves=0;
+    Signaling timedOut([&](const std::string&,const std::string& path,const Json&)->Json {
+        if(path.ends_with("/leave")){++leaves;return Json::object();}
+        throw std::runtime_error("offline");
+    },hostRoom,true,{20000,20000,100000,150000});
+    timedOut.start();until(timedOut,[](const Json& e){return e.at("event")=="closed" && e.at("code")=="COORDINATION_UNAVAILABLE";});
+    timedOut.stop();expect(leaves==0,"Recovery timeout sent a destructive leave request");
     Signaling bounded([](const auto&,const auto&,const auto&){return Json::object();},room,false);
     for(unsigned i=0;i<128;++i)bounded.send("host",id('a'),{{"type","candidate"}});
     rejected=false;try{bounded.send("host",id('a'),{{"type","candidate"}});}catch(const std::runtime_error&){rejected=true;}
