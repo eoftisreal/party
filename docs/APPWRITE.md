@@ -8,7 +8,7 @@ The original JWT verification and hashed invitations were retained. Changes corr
 
 Use a separate development database (`party-v2` is suggested). The original pilot collections lack the new attributes. Do not delete an existing database or apply required attributes to populated legacy collections blindly. `backend/tools/setup.js` creates collections/attributes/indexes and checks collection permissions without deleting data. Existing incompatible attributes need manual migration; old client applications need the v2 session header.
 
-Use the legacy `/databases`/collections/documents API supported by `node-appwrite@23.1.0`. Your deployment must support `createTransaction`, document `transactionId`, and commit/rollback. Cloud/self-hosted versions lacking these endpoints will fail; run the live smoke test before relying on the service.
+Use the legacy `/databases`/collections/documents API supported by `node-appwrite@23.1.0`. Your deployment must support `createTransaction`, document `transactionId`, transaction-aware `incrementDocumentAttribute`, and commit/rollback. Cloud/self-hosted versions lacking these endpoints will fail; run the live smoke test before relying on the service.
 
 With a short-lived **server-only setup key** having database, collection, attribute and index read/write permissions:
 
@@ -92,6 +92,8 @@ If it still fails, open that execution's error log. A safe diagnostic looks like
 ```json
 {"event":"party_backend_error","operation":"transactions.create","status":400,"errorType":"general_argument_invalid","errorName":"AppwriteException"}
 ```
+
+A diagnostic with `operation: transactions.commit`, status 409 and `errorType: transaction_conflict` means a staged document changed concurrently before commit. Older room/inbox GET handlers also staged room revision writes, causing host and viewer polling to compete with signaling and heartbeats. Polls now use read-only, revision-validated snapshots; mutations retain atomic revision staging and full transaction retries with randomized backoff. Continuous snapshot changes can still return `RETRY`, and conflicting mutations can still exhaust the bounded retry budget. These are retryable coordination responses, not video decoding errors. There is no schema migration or client protocol change: redeploy the backend after merging. The local tests exercise overlapping SDK transactions and authorization races; live Appwrite behavior still needs the deployment smoke test.
 
 Operations identify `transactions.create`, `transactions.commit`, `transactions.rollback`, `account.get`, or `documents.<action>:<logical-collection>`. Error types/names use an allowlist; unrecognized types appear as `unknown`. Logs intentionally omit SDK messages, response bodies, stack traces, URLs, document identifiers, request data and credentials. A rollback failure does not replace the original failing-operation diagnostic. Share only this diagnostic line and the deployed commit when requesting help. Public responses remain generic.
 

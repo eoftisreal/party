@@ -24,8 +24,9 @@ export function makeRoomsService(store, { now = () => Date.now(), random = rando
       fail(410, 'ROOM_CLOSED', 'Room closed or expired');
   }
   async function lockRoom(s, id) {
-    const original = await get(s, id);
-    await s.updateRoom(id, { revision: (original.revision || 0) + 1 });
+    // Atomic increment avoids computing a revision from a stale preliminary read.
+    await get(s, id);
+    await s.bumpRoom(id);
     // Stage the write BEFORE authorization, then re-read the staged document.
     // Appwrite transactions are optimistic; an unstaged preliminary read is not a lock.
     return get(s, id);
@@ -39,7 +40,18 @@ export function makeRoomsService(store, { now = () => Date.now(), random = rando
     if (requireSession && !allowOffline && Date.parse(m.lastSeenAt) + 120000 <= now()) fail(403, 'PEER_EXPIRED', 'Peer lease expired; join again');
     return { room, member: m };
   }
-  async function touch(s, r) { await s.updateRoom(r.$id, { revision: (r.revision || 0) + 1 }); }
+  async function inspect(id, user, session, work, requireSession = true) {
+    // Polls never stage writes or commit a transaction. Revalidate after collecting
+    // the response so closure/session replacement cannot leak a stale inbox.
+    for (let attempt = 0; attempt < 4; ++attempt) {
+      const before = await authorize(store, id, user, session, requireSession);
+      const result = await work(store, before.room);
+      const after = await authorize(store, id, user, session, requireSession);
+      if (before.room.revision === after.room.revision && before.room.$updatedAt === after.room.$updatedAt &&
+          before.member.sessionId === after.member.sessionId) return result;
+    }
+    fail(409, 'RETRY', 'Room changed while reading; retry request');
+  }
   function safe(r, ms, user, session) {
     return { roomId: r.$id, title: r.title, hostId: r.hostId, status: r.status, expiresAt: r.expiresAt,
       participants: ms.map(m => ({ userId: m.userId, joinedAt: m.joinedAt, online: Date.parse(m.lastSeenAt) + 120000 > now(), ...(r.hostId === user ? { sessionVersion: digest(m.sessionId || '') } : {}) })),
@@ -65,7 +77,7 @@ export function makeRoomsService(store, { now = () => Date.now(), random = rando
     });
   }
   return {
-    authorize, active, touch, token, timestamp, now,
+    authorize, active, inspect, token, timestamp, now,
     async create(user, input = {}) {
       const title = input.title ?? 'Watch party';
       if (typeof title !== 'string' || !title.trim() || title.trim().length > 80) fail(400, 'INVALID_TITLE', 'Title must be 1 to 80 characters');
@@ -91,7 +103,7 @@ export function makeRoomsService(store, { now = () => Date.now(), random = rando
         if(renewing) {
           if(!existing)fail(403,'NOT_A_MEMBER','Membership no longer exists');
           if(existing.sessionId===renewed && Date.parse(existing.lastSeenAt)+120000>now()) {
-            await s.updateMember(mid,{lastSeenAt:timestamp()});await touch(s,r);
+            await s.updateMember(mid,{lastSeenAt:timestamp()});
             return safe(r,await s.listMembers(id),user,renewed);
           }
           if(existing.sessionId!==renewal.previousSession && existing.sessionId!==renewed)
@@ -117,27 +129,24 @@ export function makeRoomsService(store, { now = () => Date.now(), random = rando
           r.expiresAt = new Date(now() + reconnectWindowMs).toISOString();
           await s.updateRoom(id, { expiresAt: r.expiresAt });
         }
-        await touch(s, r);
         return safe(r, await s.listMembers(id), user, sessionId);
       });
     },
     async read(id, user, session) {
-      return store.atomic(async s => {
-        const {room}=await authorize(s,id,user,session,Boolean(session));
+      return inspect(id, user, session, async (s, room) => {
         const members=await s.listMembers(id);
         const peers=await s.listPeers(id);
         const p=peers.find(p=>members.some(m=>m.userId===p.hostId && m.sessionId===p.hostSession) &&
           members.some(m=>m.userId===p.viewerId && m.sessionId===p.viewerSession));
         const connection=p?{generation:p.generation,viewerId:p.viewerId,state:members.every(m=>Date.parse(m.lastSeenAt)+120000>now())?p.state:'closed'}:null;
         return {...safe(room,members,user),connection};
-      });
+      }, Boolean(session));
     },
     async heartbeat(id, user, session) {
       return store.atomic(async s => {
         const { room } = await authorize(s, id, user, session);
         await s.updateMember(memberId(id, user), { lastSeenAt: timestamp() });
         if (room.hostId === user) await s.updateRoom(id, { expiresAt: new Date(now() + reconnectWindowMs).toISOString() });
-        await touch(s, room);
         return { ok: true, serverTimeMs: now() };
       });
     },
@@ -146,7 +155,7 @@ export function makeRoomsService(store, { now = () => Date.now(), random = rando
         const { room } = await authorize(s, id, user, session, true, true);
         await revoke(s, id, user);
         if (room.hostId === user) await s.updateRoom(id, { status: 'closed', revision: (room.revision || 0) + 1 });
-        else { await s.deleteMember(memberId(id, user)); await touch(s, room); }
+        else await s.deleteMember(memberId(id, user));
         return { left: true, roomClosed: room.hostId === user };
       });
     },
@@ -162,7 +171,8 @@ export function makeRoomsService(store, { now = () => Date.now(), random = rando
       // Scheduled invocation only, never routed through the public HTTP API.
       for (const r of await store.listRooms()) if (r.status === 'open' && Date.parse(r.expiresAt) <= now()) {
         await store.atomic(async s => {
-          const fresh = await get(s, r.$id);
+          const fresh = await lockRoom(s, r.$id);
+          if (fresh.status !== 'open' || Date.parse(fresh.expiresAt) > now()) return;
           await revoke(s, r.$id, fresh.hostId);
           await s.updateRoom(r.$id, { status: 'closed', revision: (fresh.revision || 0) + 1 });
         });

@@ -1,10 +1,11 @@
 import { Client, Databases, Account, Query, Permission, Role } from 'node-appwrite';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { appwriteOperation } from './diagnostics.js';
 
 // Appwrite 2.4.0 validates transaction TTL in [60, 3600] seconds.
 const TRANSACTION_TTL_SECONDS = 60;
 
-export function makeAppwriteStore(env, runtimeKey) {
+export function makeAppwriteStore(env, runtimeKey, { wait = sleep, random = Math.random } = {}) {
   const endpoint = env.APPWRITE_FUNCTION_API_ENDPOINT || env.APPWRITE_ENDPOINT;
   const project = env.APPWRITE_FUNCTION_PROJECT_ID || env.APPWRITE_PROJECT_ID;
   const databaseId = env.PARTY_DATABASE_ID;
@@ -35,6 +36,7 @@ export function makeAppwriteStore(env, runtimeKey) {
       isTransaction: Boolean(transactionId),
       getRoom: id => get('rooms', id), createRoom: (id, data) => create('rooms', id, data),
       updateRoom: (id, data) => update('rooms', id, data), deleteRoom: id => remove('rooms', id),
+      bumpRoom: id => appwriteOperation('documents.update:rooms', () => db.incrementDocumentAttribute({ ...args('rooms'), documentId: id, attribute: 'revision', value: 1 })),
       getMember: id => get('members', id), createMember: (id, data) => create('members', id, data),
       updateMember: (id, data) => update('members', id, data), deleteMember: id => remove('members', id),
       listMembers: id => list('members', [Query.equal('roomId', id)]),
@@ -64,6 +66,9 @@ export function makeAppwriteStore(env, runtimeKey) {
       } catch (e) {
         try { await appwriteOperation('transactions.rollback', () => db.updateTransaction({ transactionId: tx.$id, rollback: true })); } catch { /* preserve original error */ }
         if (e.code !== 409 || attempt === 3) throw e;
+        // Independent Functions must not retry in lockstep against the same room.
+        // Roll back first, then replay the entire operation in a fresh transaction.
+        await wait(Math.floor((25 + random() * 75) * 2 ** attempt));
       }
     }
   };
