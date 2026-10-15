@@ -21,6 +21,7 @@ import threading
 import time
 parser=argparse.ArgumentParser()
 parser.add_argument('executable');parser.add_argument('movie');parser.add_argument('--report')
+parser.add_argument('--guest',action='store_true',help='Use account-free in-memory guest credentials for native clients')
 parser.add_argument('--outage',action='store_true',help='Exercise a real 102-second HTTP outage and authorization lease recovery')
 parser.add_argument('--unicode',action='store_true',default=os.name=='nt',help='Exercise a Unicode host-side input filename')
 args=parser.parse_args()
@@ -76,7 +77,7 @@ with tempfile.TemporaryDirectory(prefix='party-processes-') as temporary:
         '-days','1','-subj','/CN=localhost','-addext','subjectAltName=IP:127.0.0.1,DNS:localhost'],check=True,capture_output=True)
     base=dict(os.environ,SDL_AUDIODRIVER='dummy',PARTY_CA_BUNDLE=str(cert),PARTY_ICE_SERVERS='[]',PARTY_RELAY_ONLY='0',PARTY_BIND_ADDRESS='127.0.0.1')
     # Never reuse a developer's account credentials in an offline fixture.
-    for name in ['PARTY_JWT_FILE','PARTY_SESSION_SECRET','PARTY_APPWRITE_ENDPOINT','PARTY_PROJECT_ID','PARTY_DATABASE_ID']:base.pop(name,None)
+    for name in ['PARTY_JWT_FILE','PARTY_SESSION_SECRET','PARTY_APPWRITE_ENDPOINT','PARTY_PROJECT_ID','PARTY_DATABASE_ID','PARTY_HOST_JWT','PARTY_VIEWER_JWT']:base.pop(name,None)
     hostToken=secrets.token_urlsafe(32);viewerToken=secrets.token_urlsafe(32)
     fixtureEnv=dict(base,TEST_HOST_TOKEN=hostToken,TEST_VIEWER_TOKEN=viewerToken,TEST_KEY=str(key),TEST_CERT=str(cert))
     try:
@@ -87,10 +88,10 @@ with tempfile.TemporaryDirectory(prefix='party-processes-') as temporary:
         base.update(PARTY_APPWRITE_ENDPOINT=base['PARTY_FUNCTION_URL'],PARTY_PROJECT_ID='offline-fixture')
         base.pop('PARTY_JWT',None)
         hostDir=work/'host';hostDir.mkdir();viewerDir=work/'viewer';viewerDir.mkdir()
-        host=App([str(exe),'host','--file',str(movie),'--software'],dict(base,PARTY_SESSION_SECRET=hostToken),hostDir);apps.append(host)
+        host=App([str(exe),'host','--file',str(movie),'--software'],base if args.guest else dict(base,PARTY_SESSION_SECRET=hostToken),hostDir);apps.append(host)
         room=host.line('Room: ');invite=host.line('Invite (share privately): ')
         def join():
-            v=App([str(exe),'viewer','--room',room,'--invite',invite,'--headless'],dict(base,PARTY_SESSION_SECRET=viewerToken),viewerDir);apps.append(v);return v
+            v=App([str(exe),'viewer','--room',room,'--invite',invite,'--headless'],base if args.guest else dict(base,PARTY_SESSION_SECRET=viewerToken),viewerDir);apps.append(v);return v
         viewer=join()
         viewer.wait(lambda:viewer.latest('player','renderedVideoFrames')>25 and viewer.latest('player','decodedAudioPackets')>50)
         before=viewer.latest('player','renderedVideoFrames');host.command('pause');time.sleep(2.5);viewer.command('stats');time.sleep(.4)
@@ -125,20 +126,27 @@ with tempfile.TemporaryDirectory(prefix='party-processes-') as temporary:
         assert viewer.process.returncode==0 and host.process.returncode==0,'Unclean application shutdown'
         assert not list(viewerDir.rglob('*')),'Viewer wrote persistent files'
         report.update(firstViewer=first,secondViewer=second,seekEpochs=epochs,viewerFiles=[],exitCodes=[a.process.returncode for a in apps])
+        if args.guest:
+            req=urllib.request.Request(f'https://127.0.0.1:{port}/test-metrics',headers={'Authorization':'Bearer '+hostToken})
+            with urllib.request.urlopen(req,context=ssl.create_default_context(cafile=str(cert))) as response:guestCounts=json.load(response)
+            assert guestCounts['jwtRequests']==0,'Guest clients contacted Appwrite account authentication'
+            assert guestCounts['guestRequests']==3,'Guest token was not reused for reconnects'
+            report['nativeAuthentication']='account-free guests; zero account/JWT requests'
         # Exercise the deployment smoke script against the same offline fixture too.
         def mint(secret):
             req=urllib.request.Request(base['PARTY_APPWRITE_ENDPOINT']+'/account/jwts',data=b'{}',method='POST',
                 headers={'Content-Type':'application/json','X-Appwrite-Session':secret})
             with urllib.request.urlopen(req,context=ssl.create_default_context(cafile=str(cert))) as response:return json.load(response)['jwt']
-        smoke=subprocess.run(['node',str(root/'backend/tools/smoke.js')],env=dict(base,
-            PARTY_HOST_JWT=mint(hostToken),PARTY_VIEWER_JWT=mint(viewerToken),NODE_EXTRA_CA_CERTS=str(cert)),capture_output=True,text=True,timeout=45)
+        smokeEnv=dict(base,NODE_EXTRA_CA_CERTS=str(cert))
+        if not args.guest:smokeEnv.update(PARTY_HOST_JWT=mint(hostToken),PARTY_VIEWER_JWT=mint(viewerToken))
+        smoke=subprocess.run(['node',str(root/'backend/tools/smoke.js')],env=smokeEnv,capture_output=True,text=True,timeout=45)
         if smoke.returncode:raise RuntimeError('Offline coordination smoke failed: '+smoke.stderr)
         report['coordinationSmoke']='deployment smoke script with synthetic authentication and in-memory DB (not Cloud)'
         request=urllib.request.Request(f'https://127.0.0.1:{port}/test-metrics' ,headers={'Authorization':'Bearer '+hostToken})
         with urllib.request.urlopen(request,context=ssl.create_default_context(cafile=str(cert))) as response:counts=json.load(response)
         server.terminate();server.wait(timeout=5)
         assert counts.get('signalResponseDropped')==1 and counts.get('ackResponseDropped')==1,'Lost-response scenarios not exercised'
-        assert counts['jwtRequests']>=5 and counts['expiredJwts']==2,'JWT 401 renewal not exercised'
+        if not args.guest:assert counts['jwtRequests']>=5 and counts['expiredJwts']==2,'JWT 401 renewal not exercised'
         report['fixtureCounters']=counts;report['passed']=True
     except Exception as error:
         report['passed']=False;report['failure']=str(error)

@@ -1,6 +1,6 @@
 # Party — C++20 live watch-party prototype
 
-A host streams a local movie to one remote viewer using **H.264/Opus over encrypted WebRTC RTP**. The viewer needs no copy of the movie. Appwrite coordinates authenticated rooms, host authorization, signaling and membership; it does not carry media.
+A host streams a local movie to one remote viewer using **H.264/Opus over encrypted WebRTC RTP**. The viewer needs no copy of the movie. Appwrite coordinates temporary guest rooms, host authorization, signaling and membership; it does not carry media.
 
 The standalone `party` application supports host play/pause/seek/stop, optional local preview, viewer playback, ICE connection replacement, bounded jitter buffering, NACK/PLI recovery, network statistics and configurable UDP STUN/TURN. The transport is pinned libdatachannel; media decoding/encoding is FFmpeg; prototype output is SDL2. Viewer media remains in memory.
 
@@ -60,7 +60,7 @@ The generated movie is a real encoded test-pattern video with audio. The loopbac
 
 ## Remote use
 
-Deploy Appwrite and supply each user's own session/JWT, endpoint/project and optional ICE server configuration as documented. The executable does not load `.env` files automatically.
+Deploy Appwrite and set `PARTY_FUNCTION_URL`; account-free guest sessions are the default when no legacy user credentials are configured. Share the displayed room ID and invite code with the viewer. Configure optional ICE servers as documented. See [guest sessions and reconnects](docs/GUEST_SESSIONS.md). The executable does not load `.env` files automatically.
 
 ```sh
 # Host: creates a private room and prints room ID + invite.

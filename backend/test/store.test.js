@@ -17,12 +17,15 @@ test('actual Appwrite SDK sends transactionId, private permissions and recipient
       assert.equal(s.isTransaction,true);
       await s.createSignal('abc',{payload:'secret'});
       await s.notify('abc',{userId:'viewer',roomId:'room'});
+      await s.notify('guest',{userId:'g_'+'a'.repeat(32),roomId:'room'});
       await s.listMembers('room');
     });
     const signal=calls.find(x=>x.path.includes('/signals/')&&x.method==='post');
     assert.equal(signal.payload.transactionId,'tx');assert.deepEqual(signal.payload.permissions,[]);
     const notification=calls.find(x=>x.path.includes('/notifications/')&&x.method==='post');
     assert.deepEqual(notification.payload.permissions,['read("user:viewer")']);
+    const guestNotice=calls.find(x=>x.path.includes('/notifications/')&&x.method==='post'&&x.payload.documentId==='guest');
+    assert.deepEqual(guestNotice.payload.permissions,[]);
     assert.equal(calls.at(-1).payload.commit,true);
     await assert.rejects(store.atomic(async()=>{throw Error('rollback');}));
     assert.equal(calls.at(-1).payload.rollback,true);

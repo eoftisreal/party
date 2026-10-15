@@ -20,11 +20,11 @@ public:
     std::string jwt();
     std::string sessionId, roomId;
 private:
-    std::string functionUrl_, endpoint_, project_, jwt_, sessionSecret_;
+    std::string functionUrl_, endpoint_, project_, jwt_, sessionSecret_, guestToken_;
     int64_t jwtExpiryUs_ = 0;
 };
 // All HTTP work happens on one worker. The render/network-pacer thread never blocks on Functions.
-struct SignalingOptions { int64_t pollUs=2000000, heartbeatUs=10000000, leaseUs=120000000, recoveryUs=300000000; };
+struct SignalingOptions { int64_t pollUs=2000000, heartbeatUs=10000000, leaseUs=120000000, recoveryUs=1800000000; };
 class Signaling {
 public:
     using Request = std::function<Json(const std::string&,const std::string&,const Json&)>;

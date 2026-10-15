@@ -5,6 +5,7 @@ export class ApiError extends Error {
 export const digest = s => createHash('sha256').update(s).digest('hex');
 export const memberId = (room, user) => digest(`${room}:${user}`).slice(0, 32);
 export const peerId = (room, user) => digest(`peer:${room}:${user}`).slice(0, 32);
+export const reconnectWindowMs = 30 * 60 * 1000;
 export const idPattern = /^[a-f0-9]{32}$/;
 export function fail(status, code, message) { throw new ApiError(status, code, message); }
 export function makeRoomsService(store, { now = () => Date.now(), random = randomBytes, createLimitPerHour = 0 } = {}) {
@@ -29,13 +30,13 @@ export function makeRoomsService(store, { now = () => Date.now(), random = rando
     // Appwrite transactions are optimistic; an unstaged preliminary read is not a lock.
     return get(s, id);
   }
-  async function authorize(s, id, user, session, requireSession = true) {
+  async function authorize(s, id, user, session, requireSession = true, allowOffline = false) {
     const room = s.isTransaction ? await lockRoom(s, id) : await get(s, id); active(room);
     const m = await s.getMember(memberId(id, user));
     if (!m) fail(403, 'NOT_A_MEMBER', 'Not a room member');
     if (requireSession && (!idPattern.test(session || '') || session !== m.sessionId))
       fail(403, 'STALE_SESSION', 'Join again; session was replaced');
-    if (requireSession && Date.parse(m.lastSeenAt) + 120000 <= now()) fail(403, 'PEER_EXPIRED', 'Peer lease expired; join again');
+    if (requireSession && !allowOffline && Date.parse(m.lastSeenAt) + 120000 <= now()) fail(403, 'PEER_EXPIRED', 'Peer lease expired; join again');
     return { room, member: m };
   }
   async function touch(s, r) { await s.updateRoom(r.$id, { revision: (r.revision || 0) + 1 }); }
@@ -72,7 +73,7 @@ export function makeRoomsService(store, { now = () => Date.now(), random = rando
       const id = token(), inviteCode = random(24).toString('base64url'), sessionId = token();
       return store.atomic(async s => {
         const r = await s.createRoom(id, { hostId: user, title: title.trim(), inviteHash: digest(inviteCode), status: 'open', revision: 0,
-          expiresAt: new Date(now() + 86400000).toISOString() });
+          expiresAt: new Date(now() + reconnectWindowMs).toISOString() });
         const m = { roomId: id, userId: user, joinedAt: timestamp(), lastSeenAt: timestamp(), sessionId, rateWindow: 0, rateCount: 0 };
         await s.createMember(memberId(id, user), m);
         return { ...safe(r, [m], user, sessionId), inviteCode };
@@ -104,7 +105,7 @@ export function makeRoomsService(store, { now = () => Date.now(), random = rando
           if (a.length !== b.length || !timingSafeEqual(a, b)) fail(403, 'INVALID_INVITE', 'Invalid invite');
           const members = await s.listMembers(id);
           // One host + one viewer; stale viewers are explicitly removed before admitting another.
-          for (const m of members) if (m.userId !== r.hostId && Date.parse(m.lastSeenAt) + 120000 <= now()) {
+          for (const m of members) if (m.userId !== r.hostId && Date.parse(m.lastSeenAt) + reconnectWindowMs <= now()) {
             await revoke(s, id, m.userId); await s.deleteMember(memberId(id, m.userId));
           }
           if ((await s.listMembers(id)).length >= 2) fail(409, 'ROOM_FULL', 'Prototype supports one viewer');
@@ -112,6 +113,10 @@ export function makeRoomsService(store, { now = () => Date.now(), random = rando
         const sessionId = renewed || token();
         const m = { roomId: id, userId: user, joinedAt: existing?.joinedAt || timestamp(), lastSeenAt: timestamp(), sessionId, rateWindow: 0, rateCount: 0 };
         if (existing) await s.updateMember(mid, m); else await s.createMember(mid, m);
+        if (r.hostId === user) {
+          r.expiresAt = new Date(now() + reconnectWindowMs).toISOString();
+          await s.updateRoom(id, { expiresAt: r.expiresAt });
+        }
         await touch(s, r);
         return safe(r, await s.listMembers(id), user, sessionId);
       });
@@ -130,13 +135,15 @@ export function makeRoomsService(store, { now = () => Date.now(), random = rando
     async heartbeat(id, user, session) {
       return store.atomic(async s => {
         const { room } = await authorize(s, id, user, session);
-        await s.updateMember(memberId(id, user), { lastSeenAt: timestamp() }); await touch(s, room);
+        await s.updateMember(memberId(id, user), { lastSeenAt: timestamp() });
+        if (room.hostId === user) await s.updateRoom(id, { expiresAt: new Date(now() + reconnectWindowMs).toISOString() });
+        await touch(s, room);
         return { ok: true, serverTimeMs: now() };
       });
     },
     async leave(id, user, session) {
       return store.atomic(async s => {
-        const { room } = await authorize(s, id, user, session);
+        const { room } = await authorize(s, id, user, session, true, true);
         await revoke(s, id, user);
         if (room.hostId === user) await s.updateRoom(id, { status: 'closed', revision: (room.revision || 0) + 1 });
         else { await s.deleteMember(memberId(id, user)); await touch(s, room); }
@@ -145,7 +152,7 @@ export function makeRoomsService(store, { now = () => Date.now(), random = rando
     },
     async close(id, user, session) {
       return store.atomic(async s => {
-        const { room } = await authorize(s, id, user, session);
+        const { room } = await authorize(s, id, user, session, true, true);
         if (room.hostId !== user) fail(403, 'HOST_ONLY', 'Only host can close');
         await revoke(s, id, user); await s.updateRoom(id, { status: 'closed', revision: (room.revision || 0) + 1 });
         return { closed: true };

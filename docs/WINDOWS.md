@@ -1,5 +1,7 @@
 # Windows 11 build and two-machine test
 
+Guest mode now needs only `PARTY_FUNCTION_URL` for coordination; leave legacy credential variables unset. See [guest sessions and the 30-minute reconnect window](GUEST_SESSIONS.md). The account setup examples below remain optional for legacy integrations.
+
 ## Build
 
 Install Visual Studio 2022 with Desktop development with C++, CMake and Ninja; Git, Python 3, Node.js 22 and OpenSSL (included in Git for Windows) are needed for the test scripts. Use an x64 Native Tools PowerShell. The manifest pins a vcpkg baseline with FFmpeg 7.1.1; local Linux verification used FFmpeg 6.1.1. Windows CI uses MSVC on Windows Server 2022 and SDL dummy devices; physical Windows 11 output/GPU acceptance remains separate. Consult [the current audit record](AUDIT.md) for actual CI results.

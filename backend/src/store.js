@@ -47,7 +47,7 @@ export function makeAppwriteStore(env, runtimeKey) {
       getReceipt: id => get('notifications', id),
       getLimit: id => get('limits', id), createLimit: (id,data) => create('limits',id,data), updateLimit: (id,data) => update('limits',id,data),
       notify: async (id, data) => {
-        if (!await get('notifications', id)) return create('notifications', id, data, [Permission.read(Role.user(data.userId))]);
+        if (!await get('notifications', id)) return create('notifications', id, data, data.userId.startsWith('g_') ? [] : [Permission.read(Role.user(data.userId))]);
       },
       listNotifications: () => list('notifications', []), deleteNotification: id => remove('notifications', id),
       listRooms: () => list('rooms', []),
