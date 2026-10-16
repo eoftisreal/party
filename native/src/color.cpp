@@ -3,6 +3,7 @@ extern "C" {
 #include <libavutil/pixdesc.h>
 #include <libswscale/swscale.h>
 }
+#include <new>
 #include <stdexcept>
 namespace party {
 namespace {
