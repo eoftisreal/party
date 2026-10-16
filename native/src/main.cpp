@@ -19,6 +19,52 @@ struct ScopeExit {
     std::function<void()> action;
     ~ScopeExit() { try { action(); } catch (...) { /* retain the original error during unwinding */ } }
 };
+// The media pump runs in this process, not its launcher. On supported Windows
+// versions a high-resolution waitable timer avoids relying on Sleep(2)'s
+// coarse wakeup granularity. No busy-spin or global timer-resolution changes.
+class LoopPacer {
+public:
+    LoopPacer() {
+#ifdef _WIN32
+#ifdef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+        timer_ = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                                        TIMER_MODIFY_STATE | SYNCHRONIZE);
+        highResolution_ = timer_ != nullptr;
+#endif
+        if (!timer_) timer_ = CreateWaitableTimerW(nullptr, FALSE, nullptr);
+#endif
+    }
+    ~LoopPacer() {
+#ifdef _WIN32
+        if (timer_) CloseHandle(timer_);
+#endif
+    }
+    LoopPacer(const LoopPacer&) = delete;
+    LoopPacer& operator=(const LoopPacer&) = delete;
+    bool highResolution() const {
+#ifdef _WIN32
+        return highResolution_;
+#else
+        return false;
+#endif
+    }
+    void wait() {
+#ifdef _WIN32
+        if (timer_) {
+            LARGE_INTEGER dueTime{};
+            dueTime.QuadPart = -20000; // Relative 2 ms in 100 ns units.
+            if (SetWaitableTimer(timer_, &dueTime, 0, nullptr, nullptr, FALSE) &&
+                WaitForSingleObject(timer_, INFINITE) == WAIT_OBJECT_0) return;
+        }
+#endif
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+private:
+#ifdef _WIN32
+    HANDLE timer_ = nullptr;
+    bool highResolution_ = false;
+#endif
+};
 std::atomic<bool> quitting{false};
 void interrupt(int) { quitting = true; }
 std::optional<std::string> command() {
@@ -124,7 +170,18 @@ int runParty(int argc, char** argv) {
         int64_t peerStarted = 0, disconnectedSince = 0, lastState = 0, lastPing = 0, lastStats = 0;
         bool wasConnected = false, wantsPlay = true, coordinationActive=true, restartRequired=false;
         uint64_t sentEpoch=UINT64_MAX;
+        LoopPacer loopPacer;
+        int64_t lastLoopStart = 0, maxLoopIntervalUs = 0;
+        uint64_t loopIntervals = 0, lateLoopIntervals = 0;
         while (!quitting) {
+            const auto loopStart = nowUs();
+            if (lastLoopStart) {
+                const auto interval = loopStart - lastLoopStart;
+                maxLoopIntervalUs = std::max(maxLoopIntervalUs, interval);
+                if (interval > 15000) ++lateLoopIntervals;
+                ++loopIntervals;
+            }
+            lastLoopStart = loopStart;
             auto updates=signaling.events();
             // Lease enforcement must not wait for a blocked HTTPS call on the worker.
             if(coordinationActive && !signaling.leaseHealthy())updates.insert(updates.begin(),Json{{"event","coordination-lost"}});
@@ -235,10 +292,14 @@ int runParty(int argc, char** argv) {
                 } else if (*line == "stats") lastStats = 0;
             }
             if (nowUs()-lastStats > 5000000) {
-                Json stats; stats["roomReadyMs"]=roomReadyMs; stats["mediaReadyMs"]=mediaReadyMs; stats["coordinationHealthy"]=signaling.leaseHealthy();stats["coordinationActive"]=coordinationActive;stats["authorizing"]=!authorizing.empty(); if (peer) {stats["network"] = peer->stats();stats["connectionGeneration"]=generation;} if (source) stats["media"] = source->stats(); if (player) stats["player"] = player->stats();
+                Json stats;
+                stats["loop"] = {{"intervals", loopIntervals}, {"maxIntervalUs", maxLoopIntervalUs},
+                                 {"lateIntervalsOver15ms", lateLoopIntervals},
+                                 {"highResolutionWaitableTimer", loopPacer.highResolution()}};
+                stats["roomReadyMs"]=roomReadyMs; stats["mediaReadyMs"]=mediaReadyMs; stats["coordinationHealthy"]=signaling.leaseHealthy();stats["coordinationActive"]=coordinationActive;stats["authorizing"]=!authorizing.empty(); if (peer) {stats["network"] = peer->stats();stats["connectionGeneration"]=generation;} if (source) stats["media"] = source->stats(); if (player) stats["player"] = player->stats();
                 std::cout << stats.dump() << '\n'; lastStats = nowUs();
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            loopPacer.wait();
         }
         if (source) source->pause();
         if (peer) peer->close();
