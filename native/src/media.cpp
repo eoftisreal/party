@@ -211,7 +211,7 @@ struct MediaSource::Impl {
         check(av_frame_make_writable(videoFrame.get()), "writable video buffer");
         // Normalize the *pixel values* to limited-range BT.709 before tagging
         // the encoded stream. Source frame metadata overrides decoder defaults.
-        if (colorConverter.convert(frame, videoFrame, videoDecoder->colorspace, videoDecoder->color_range))
+        if (colorConverter.convert(frame, videoFrame.get(), videoDecoder->colorspace, videoDecoder->color_range))
             ++colorConvertedFrames;
         videoFrame->pts = av_rescale_q(transportBaseUs + movieUs - movieBaseUs, AV_TIME_BASE_Q, videoEncoder->time_base);
         videoFrame->pict_type = forceKeyframe.exchange(false) ? AV_PICTURE_TYPE_I : AV_PICTURE_TYPE_NONE;
