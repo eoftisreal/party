@@ -1,4 +1,5 @@
 #include "party/player.hpp"
+#include "party/color.hpp"
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavutil/channel_layout.h>
@@ -179,7 +180,17 @@ struct Player::Impl {
                 uint8_t* data = rgba.data(); const int stride = f->width*4;
                 sws = sws_getCachedContext(sws, f->width, f->height, AVPixelFormat(f->format), f->width, f->height, AV_PIX_FMT_RGBA, SWS_BILINEAR, nullptr, nullptr, nullptr);
                 if (!sws) throw std::runtime_error("Viewer scaler allocation failed");
-                sws_scale(sws, f->data, f->linesize, 0, f->height, &data, &stride);
+                // SDL's YUV path specifies BT.709 explicitly. Match it on
+                // platforms falling back to software YUV->RGBA conversion;
+                // swscale's default is otherwise commonly BT.601.
+                const auto* sourceCoefficients = sws_getCoefficients(swsMatrixId(sdrMatrix(f, AVCOL_SPC_BT709)));
+                const auto* outputCoefficients = sws_getCoefficients(SWS_CS_ITU709);
+                if (sws_setColorspaceDetails(sws, sourceCoefficients,
+                        sdrRange(f) == AVCOL_RANGE_JPEG, outputCoefficients, 1,
+                        0, 1<<16, 1<<16) < 0)
+                    throw std::runtime_error("Viewer color conversion configuration failed");
+                if (sws_scale(sws, f->data, f->linesize, 0, f->height, &data, &stride) != f->height)
+                    throw std::runtime_error("Viewer RGB conversion failed");
                 if (SDL_UpdateTexture(texture, nullptr, rgba.data(), stride) < 0)
                     throw std::runtime_error("Viewer RGB upload failed");
             }
