@@ -63,10 +63,23 @@ values to opt into higher quality.
 
 ## Diagnostics
 
+The viewer's playout target is selected at startup and rebuffering from both
+smoothed inter-arrival variation and a decaying 95th-percentile histogram
+(8 ms buckets, roughly 33-packet effective history). The existing 350–600 ms
+movie-playout limits remain unchanged. During uninterrupted playback, the
+buffer target stays fixed to avoid sudden clock jumps. This does **not** yet
+add NetEQ, WSOLA, or Opus packet-loss concealment; those require independent
+implementations and validation.
+
+The application loop uses a process-local high-resolution waitable timer on
+Windows when available, falling back to a normal waitable timer or standard
+sleep. This improves scheduling precision but does not guarantee deadlines,
+reduce OS/GPU render latency, or change the separate SDL audio device clock.
+
 Use `stats` on both sides. Compare `roomReadyMs` (initial coordination/auth),
 `mediaReadyMs` (coordination plus local media/output initialization), and `network.connectMs` (peer creation to ICE
 connection), `player.firstVideoMs` (player creation/reset to first decoded video),
-`player.playoutDelayUs`, `player.rebufferings`, `network.pacerQueueUs`,
+`player.playoutDelayUs`, `player.rebufferings`, `loop.maxIntervalUs`, `loop.lateIntervalsOver15ms`, `loop.highResolutionWaitableTimer`, `network.pacerQueueUs`,
 `network.pacerDroppedPackets`, `media.encoder`, `media.activeBitrate`,
 `media.bitrate` (requested), and `media.encoderOpens`. The first-frame metric
 includes waiting for the host; it is not solely decoder processing time.
