@@ -29,6 +29,18 @@ The default FFmpeg manifest includes x264 and Opus software encoders and the FFm
 
 CI publishes the executable and runtime DLLs in the windows-x64-prototype artifact after a successful build. Preserve the packaged paths or place the vcpkg bin DLLs alongside party.exe, and install the Visual C++ x64 runtime on a PC without Visual Studio. If DLLs are missing, verify the vcpkg `bin` directory on PATH and the CMake app-local dependency copies. Use consistent x64 triplets and Release/Debug libraries. No project API key should be set in the client environment.
 
+## Windows playout scheduling
+
+Each host and viewer process uses its own high-resolution waitable timer for
+the 2 ms media pump when Windows supports it. No system-wide timer-resolution
+change or busy-wait is required. On older systems, the application falls back
+to a normal waitable timer or standard sleep. Run `stats` and inspect
+`loop.highResolutionWaitableTimer`, `loop.maxIntervalUs`, and
+`loop.lateIntervalsOver15ms` to identify application-loop stalls. These are
+start-to-start iteration measurements, **not** a claim of end-to-end display
+frame pacing or SDL hardware audio latency. Verify smoothness on a physical
+Windows monitor and audio device before drawing conclusions.
+
 ## Local media smoke
 
 ```powershell
