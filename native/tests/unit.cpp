@@ -41,6 +41,17 @@ int main() {
         for (int i=0; i<100; ++i) { arrival+=200000; pts+=20000; budget.observe(arrival,pts); }
         expect(budget.targetUs() == 600000, "jitter budget not bounded/adaptive");
         budget.reset(); expect(budget.targetUs() == 350000, "playout reset retained old jitter");
+        PlayoutBudget bursts;
+        int64_t burstArrival = 0, burstPts = 0;
+        for (int i = 0; i < 160; ++i) {
+            burstPts += 20000;
+            burstArrival += (i % 8 == 0) ? 140000 : 20000;
+            bursts.observe(burstArrival, burstPts);
+        }
+        expect(bursts.targetUs() >= 500000, "recurring arrival bursts should grow playout budget");
+        bursts.reset();
+        for (int64_t i = 0; i < 160; ++i) bursts.observe(i * 20000, i * 20000);
+        expect(bursts.targetUs() == 350000, "burst histogram must reset on a new epoch");
         std::vector<uint8_t> packet{0x80,0xe0,0xff,0xfe,0,0,0,7,0,0,0,1,0x65,0x11};
         auto parsed = parseRtp(packet); expect(parsed && parsed->sequence == 65534 && parsed->marker && parsed->payload.size()==2, "RTP header parsing");
         packet[0] = 0x90; expect(!parseRtp(packet), "truncated extension rejected");
