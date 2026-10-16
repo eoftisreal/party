@@ -1,4 +1,5 @@
 #include "party/media.hpp"
+#include "party/color.hpp"
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
@@ -41,7 +42,7 @@ struct MediaSource::Impl {
     std::function<void(EncodedFrame)> sink;
     FormatPtr format;
     CodecPtr videoDecoder, audioDecoder, videoEncoder, audioEncoder;
-    SwsContext* scaler = nullptr;
+    SdrColorConverter colorConverter;
     SwrContext* resampler = nullptr;
     AVAudioFifo* fifo = nullptr;
     FramePtr videoFrame = newFrame();
@@ -59,7 +60,7 @@ struct MediaSource::Impl {
     std::atomic<bool> forceKeyframe{true};
     std::atomic<unsigned> targetRate;
     std::atomic<unsigned> activeBitrate{0}, encoderOpens{0};
-    std::atomic<uint64_t> videoFrames{0}, audioFrames{0}, encodedBytes{0};
+    std::atomic<uint64_t> videoFrames{0}, audioFrames{0}, encodedBytes{0}, colorConvertedFrames{0};
     Impl(const std::string& path, MediaOptions opts, std::function<void(EncodedFrame)> callback)
         : options(opts), sink(std::move(callback)), targetRate(opts.bitrate) {
         BitrateController validate(options.bitrate, options.maxBitrate);
@@ -95,7 +96,7 @@ struct MediaSource::Impl {
     }
     ~Impl() {
         thread.request_stop(); cv.notify_all(); if (thread.joinable()) thread.join();
-        sws_freeContext(scaler); swr_free(&resampler); if (fifo) av_audio_fifo_free(fifo);
+        swr_free(&resampler); if (fifo) av_audio_fifo_free(fifo);
     }
     void openVideoEncoder() {
         const std::vector<std::string> names = options.hardware ? std::vector<std::string>{"h264_nvenc", "h264_qsv", "h264_amf", "libx264"} : std::vector<std::string>{"libx264"};
@@ -208,9 +209,10 @@ struct MediaSource::Impl {
         if ((reduce && nowUs() - lastRateChangeUs > 1000000) ||
             (increase && nowUs() - lastRateChangeUs > 5000000)) { openVideoEncoder(); lastRateChangeUs = nowUs(); }
         check(av_frame_make_writable(videoFrame.get()), "writable video buffer");
-        scaler = sws_getCachedContext(scaler, frame->width, frame->height, AVPixelFormat(frame->format), options.width, options.height, videoEncoder->pix_fmt, SWS_BILINEAR, nullptr, nullptr, nullptr);
-        if (!scaler) throw std::runtime_error("Video scaler allocation failed");
-        check(sws_scale(scaler, frame->data, frame->linesize, 0, frame->height, videoFrame->data, videoFrame->linesize), "scale video");
+        // Normalize the *pixel values* to limited-range BT.709 before tagging
+        // the encoded stream. Source frame metadata overrides decoder defaults.
+        if (colorConverter.convert(frame, videoFrame, videoDecoder->colorspace, videoDecoder->color_range))
+            ++colorConvertedFrames;
         videoFrame->pts = av_rescale_q(transportBaseUs + movieUs - movieBaseUs, AV_TIME_BASE_Q, videoEncoder->time_base);
         videoFrame->pict_type = forceKeyframe.exchange(false) ? AV_PICTURE_TYPE_I : AV_PICTURE_TYPE_NONE;
         check(avcodec_send_frame(videoEncoder.get(), videoFrame.get()), "encode video"); encoded(videoEncoder.get(), true);
@@ -306,7 +308,8 @@ PlaybackState MediaSource::state() const {
 }
 Json MediaSource::stats() const {
     std::lock_guard lock(impl_->mutex);
-    return {{"encoder", impl_->encoderName}, {"width", impl_->options.width}, {"height", impl_->options.height}, {"videoFrames", impl_->videoFrames.load()}, {"audioPackets", impl_->audioFrames.load()}, {"encodedBytes", impl_->encodedBytes.load()}, {"bitrate", impl_->targetRate.load()}, {"activeBitrate", impl_->activeBitrate.load()}, {"encoderOpens", impl_->encoderOpens.load()}, {"maxBitrate", impl_->options.maxBitrate}};
+    return {{"encoder", impl_->encoderName}, {"width", impl_->options.width}, {"height", impl_->options.height}, {"videoFrames", impl_->videoFrames.load()}, {"audioPackets", impl_->audioFrames.load()}, {"encodedBytes", impl_->encodedBytes.load()}, {"bitrate", impl_->targetRate.load()}, {"activeBitrate", impl_->activeBitrate.load()}, {"encoderOpens", impl_->encoderOpens.load()}, {"maxBitrate", impl_->options.maxBitrate},
+            {"colorFormat", "bt709-limited"}, {"colorConvertedFrames", impl_->colorConvertedFrames.load()}};
 }
 std::string MediaSource::error() const { std::lock_guard lock(impl_->mutex); return impl_->failure; }
 }
