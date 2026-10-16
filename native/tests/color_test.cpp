@@ -5,6 +5,7 @@ extern "C" {
 #include <cmath>
 #include <cstdint>
 #include <iostream>
+#include <new>
 #include <stdexcept>
 
 namespace {
