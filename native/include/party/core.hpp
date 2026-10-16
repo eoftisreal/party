@@ -1,5 +1,6 @@
 #pragma once
 #include <nlohmann/json.hpp>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -49,7 +50,7 @@ struct NetworkStats {
     std::atomic<int64_t> jitterUs{0};
     Json json() const;
 };
-// Arrival variation measured on audio timestamps; caller serializes access.
+// Burst-aware arrival variation measured on audio timestamps; caller serializes access.
 class PlayoutBudget {
 public:
     void observe(int64_t arrivalUs, int64_t presentationUs);
@@ -57,6 +58,11 @@ public:
     void reset();
 private:
     int64_t arrival_ = 0, presentation_ = 0, variation_ = 0;
+    // Decaying 8 ms buckets capture recurring spikes without letting one old
+    // outlier inflate startup/rebuffer delay indefinitely.
+    std::array<double, 32> delayBuckets_{};
+    double delayWeight_ = 0.0;
+    unsigned delaySamples_ = 0;
     bool ready_ = false;
 };
 class BitrateController {
