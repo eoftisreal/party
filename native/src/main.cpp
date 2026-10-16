@@ -2,6 +2,7 @@
 #include "party/player.hpp"
 #include "party/signaling.hpp"
 #include "party/transport.hpp"
+#include <algorithm>
 #include <csignal>
 #include <cmath>
 #include <iostream>
