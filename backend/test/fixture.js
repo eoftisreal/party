@@ -22,6 +22,10 @@ export function fixture(options = {}) {
     store.listSignals = async id => [...t.Signal.values()].filter(x=>x.roomId===id).map(x=>structuredClone(x));
     store.listRooms = async () => [...t.Room.values()].map(x=>structuredClone(x));
     store.listNotifications = async () => [...t.Notification.values()].map(x=>structuredClone(x));
+    store.bumpRoom = async id => {
+      const room = await store.getRoom(id);
+      return store.updateRoom(id,{revision:room.revision+1});
+    };
     store.getReceipt = store.getNotification;
     store.notify = (id,data) => store.createNotification(id,data);
     return store;

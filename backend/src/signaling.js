@@ -73,7 +73,6 @@ export function makeSignalingService(store, rooms) {
         const data = { roomId: id, hostId: user, viewerId: input.viewerId, hostSession: session, viewerSession: viewer.sessionId,
           generation: rooms.token(), requestId: input.requestId || '', state: 'authorized', expiresAt: room.expiresAt };
         if (previous) await s.updatePeer(pid, data); else await s.createPeer(pid, data);
-        await rooms.touch(s, room);
         return { generation: data.generation, viewerId: input.viewerId };
       });
     },
@@ -114,14 +113,12 @@ export function makeSignalingService(store, rooms) {
         await s.notify(sid, { roomId: id, userId: input.to, expiresAt, fingerprint });
         if (input.type === 'offer' || input.type === 'answer' || input.type === 'disconnect')
           await s.updatePeer(p.$id, { state: input.type === 'offer' ? 'offered' : input.type === 'answer' ? 'connected' : 'closed' });
-        await rooms.touch(s, room);
         return { accepted: true, messageId: sid };
       });
     },
     async inbox(id, user, session) {
-      // Transaction + revision makes membership/close checks serializable with signal delivery.
-      return store.atomic(async s => {
-        const { room } = await rooms.authorize(s, id, user, session);
+      // Read-only polls revalidate room revision and membership before responding.
+      return rooms.inspect(id, user, session, async (s, room) => {
         const messages = [];
         for (const m of await s.listSignals(id)) {
           if (m.to !== user || m.toSession !== session || Date.parse(m.expiresAt) <= rooms.now()) continue;
@@ -130,7 +127,6 @@ export function makeSignalingService(store, rooms) {
           if (!p || p.generation !== m.generation || (p.state === 'closed' && m.type !== 'disconnect')) continue;
           messages.push({ messageId: m.$id, from: m.from, generation: m.generation, type: m.type, payload: JSON.parse(m.payload) });
         }
-        await rooms.touch(s, room);
         // Offers must be applied before any trickled candidates regardless of database order.
         messages.sort((a, b) => (a.type === 'candidate') - (b.type === 'candidate'));
         return { messages, serverTimeMs: rooms.now() };
@@ -147,7 +143,7 @@ export function makeSignalingService(store, rooms) {
           if (m && (m.roomId !== id || m.to !== user || m.toSession !== session)) fail(403, 'INVALID_ACK', 'Not your message');
           if (m) await s.deleteSignal(mid);
         }
-        await rooms.touch(s, room); return { acknowledged: true };
+        return { acknowledged: true };
       });
     },
   };
