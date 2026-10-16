@@ -3,6 +3,27 @@
 Rebuild the native player integration to use these changes. Redeploying the
 Appwrite Function alone does not update the encoder, transport or player.
 
+## SDR color accuracy
+
+Party outputs **limited-range BT.709 H.264** in every quality profile. The host
+now detects the decoded frame's YUV matrix and range (falling back to decoder
+metadata, then BT.601 for untagged SD and BT.709 for untagged HD). BT.601,
+full-range YUV, and RGB frames are explicitly transformed via an RGB
+intermediate into BT.709 limited pixels **before** the encoder tags them.
+Frames already in limited BT.709 retain the existing fast scaling path.
+The player matches BT.709 in both SDL's direct YUV path and the RGB fallback.
+Use `media.colorConvertedFrames` and `media.colorFormat` in host `stats` to
+diagnose conversion activity.
+
+This fixes incorrect matrix/range **interpretation**, not H.264 quantization,
+display calibration, gamut/ICC management, or monitor-specific HDR settings.
+It also does not implement HDR tone mapping or full wide-gamut primaries/
+transfer-function conversion. The extra RGB step adds CPU and one 8-bit
+round-trip for sources needing conversion; it is not used for ordinary
+limited BT.709 movies. For a fair comparison, capture the **same decoded
+frame** on the same calibrated SDR display at both endpoints rather than
+judging two different monitors by eye.
+
 ## Host quality profiles
 
 ```
