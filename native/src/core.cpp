@@ -54,12 +54,39 @@ void PlayoutBudget::observe(int64_t arrival, int64_t presentation) {
         if (elapsed < 1000000 && media < 1000000) {
             const auto delta = std::min<int64_t>(250000, std::abs(elapsed - media));
             variation_ += (delta - variation_) / 16;
+            constexpr double decay = 0.97; // Approx. 33 packet effective window.
+            for (auto& weight : delayBuckets_) weight *= decay;
+            const auto bucket = std::min<size_t>(delayBuckets_.size() - 1, size_t(delta / 8000));
+            delayBuckets_[bucket] += 1.0;
+            delayWeight_ = delayWeight_ * decay + 1.0;
+            if (delaySamples_ < 32) ++delaySamples_;
         }
     }
     if (!ready_ || presentation > presentation_) { arrival_ = arrival; presentation_ = presentation; ready_ = true; }
 }
-int64_t PlayoutBudget::targetUs() const { return std::clamp<int64_t>(350000 + 4 * variation_, 350000, 600000); }
-void PlayoutBudget::reset() { arrival_ = presentation_ = variation_ = 0; ready_ = false; }
+int64_t PlayoutBudget::targetUs() const {
+    int64_t burstUs = 0;
+    // Wait for a representative sample window; a single startup packet must
+    // not force the maximum delay. Audio packets arrive roughly every 20 ms.
+    if (delaySamples_ >= 32 && delayWeight_ > 0.0) {
+        const auto threshold = 0.95 * delayWeight_;
+        double cumulative = 0.0;
+        for (size_t i = 0; i < delayBuckets_.size(); ++i) {
+            cumulative += delayBuckets_[i];
+            if (cumulative >= threshold) { burstUs = int64_t(i) * 8000; break; }
+        }
+    }
+    // Retain the existing movie-friendly 350-600 ms bounds. Only select a
+    // new target while buffering; uninterrupted playback keeps its anchor.
+    return std::clamp<int64_t>(350000 + std::max(4 * variation_, 2 * burstUs), 350000, 600000);
+}
+void PlayoutBudget::reset() {
+    arrival_ = presentation_ = variation_ = 0;
+    delayBuckets_.fill(0.0);
+    delayWeight_ = 0.0;
+    delaySamples_ = 0;
+    ready_ = false;
+}
 BitrateController::BitrateController(unsigned initial, unsigned maximum) : bitrate_(initial), maximum_(maximum) {
     if (initial < 300000 || initial > maximum || maximum > 12000000)
         throw std::invalid_argument("Bitrate must satisfy 300000 <= initial <= maximum <= 12000000");
