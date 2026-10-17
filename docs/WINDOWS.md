@@ -82,13 +82,13 @@ Host PC:
 # Only after software playback passes, omit --software to probe compatible GPU encoders.
 ```
 
-Share the printed room ID and invite code privately. On the viewer PC, use a **different user's** session:
+Share the printed room ID and invite code privately. Up to five viewers by default can each join from a separate PC. Use a **different user's** session per viewer:
 
 ```powershell
 .\build\party.exe viewer --room '<room-id>' --invite '<invite-code>'
 ```
 
-The viewer receives the live encoded stream and needs no local movie. Close the SDL window or enter `quit` to leave. Host terminal commands: `play`, `pause`, `seek 120`, `stop`, `stats`, `quit`. `seek` uses movie seconds. Controls belong to the host. Preview uses the same stream and playout delay as viewers.
+Each viewer receives their own encrypted WebRTC stream and needs no local movie. The host encodes one copy of the movie and fans it out across the active peer connections. Close the SDL window or enter `quit` to leave. Host terminal commands: `play`, `pause`, `seek 120`, `stop`, `stats`, `quit`. `seek` uses movie seconds. Controls belong to the host. Preview uses the same stream and playout delay as viewers.
 
 Allow the applications' UDP traffic through Windows Firewall on the networks used for the test. First use two PCs on the same LAN; then different Internet connections. STUN must be reachable for server-reflexive candidates. ICE failures are reported; the host replaces the connection generation after failure, preserving movie position. A disconnected host stops advancing playback until a viewer reconnects, retaining the user's intended play/pause state. A host paused before disconnection stays paused after reconnection. Appwrite outages pause/close media at 100 seconds without a heartbeat; expired membership rejoins, while a replaced session fails closed. No complete movie is uploaded to Appwrite or written by the viewer.
 
