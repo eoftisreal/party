@@ -5,7 +5,45 @@ NAT and firewalls can prevent direct WebRTC connections. STUN discovers public
 candidates; TURN supplies a relay when direct connectivity fails. Appwrite
 coordinates rooms and signaling; it does not relay the movie.
 
-## Configure the relay once
+## Direct connections by default
+
+The backend returns `stun:stun.cloudflare.com:3478` when `PARTY_STUN_URLS` is
+unset. This is Cloudflare's public STUN service: no account or TURN credentials
+are needed. STUN exchanges small address-discovery packets; it never receives
+the movie stream. The players' ICE implementation already checks direct paths,
+including available IPv4/IPv6 host candidates and UDP hole punching. This change
+supplies the missing default public-address discovery rather than replacing ICE.
+
+To try the direct path:
+
+1. Deploy this backend and update both players to versions that fetch `/ice`.
+2. Leave `PARTY_STUN_URLS` unset. Leave `PARTY_TURN_URLS` and `PARTY_TURN_SECRET`
+   unset if you want no relay configured. Unset local `PARTY_ICE_SERVERS` overrides
+   and leave `PARTY_RELAY_ONLY` unset or `0`.
+3. Start the host and viewer on different networks. No video upload or TURN
+   subscription is required.
+4. Inspect `network.connectionPath`: `direct` means neither selected candidate is
+   relayed; `relay` means at least one is; `unselected` means no classified path yet.
+   Check `connected` too, since a selected pair alone does not prove active playback.
+
+`network.localCandidates.srflx` reports discovered server-reflexive candidates.
+A positive count confirms public-mapping discovery, **not** that the other network
+can reach that mapping. `iceGatheringComplete`, `stunServersConfigured`,
+`turnServersConfigured` and `remoteTrickleCandidatesApplied` help distinguish
+configuration, gathering and signaling issues without logging IPs or credentials.
+
+Override `PARTY_STUN_URLS` with your own STUN URL if desired. Set it to `[]` (or an
+empty string) to opt out of public discovery. An explicit local
+`PARTY_ICE_SERVERS=[]` also keeps testing local and bypasses backend settings.
+
+This removes the need to provision a relay for networks where direct ICE succeeds.
+It cannot make every pair of restrictive NATs/firewalls accept direct traffic.
+If both devices gather candidates and exchange them but cannot connect, use a
+reachable network path or the optional TURN fallback below. Do not disable the
+firewall as a workaround. With TURN configured, normal ICE can use direct and
+relay candidates; `PARTY_RELAY_ONLY=1` is only for relay diagnostics.
+
+## Optional relay fallback
 
 Run coturn on an Internet-reachable Linux server, or use a service compatible with
 coturn's shared-secret TURN REST credentials. The server must have a reachable
@@ -65,7 +103,8 @@ x-party-session: <current-session-id>
 The response is marked `Cache-Control: no-store` and contains `iceServers`
 (entries with `url`, plus `username`/`credential` for TURN), `ttlSeconds`,
 `expiresAt` (Unix seconds), and `turnConfigured`. It never contains the shared
-secret. Missing configuration returns an empty list and `turnConfigured:false`;
+secret. Default configuration returns the public STUN entry and `turnConfigured:false`;
+explicitly disabling STUN with no TURN configured returns an empty list;
 invalid configuration returns 503 `ICE_CONFIGURATION_ERROR`. Membership, room
 status, session replacement and lease checks apply before and after issuance.
 
@@ -80,7 +119,7 @@ must implement the same request before creating their own peer connection.
 ## Verify using two networks
 
 1. Host on Wi-Fi; join from mobile data or a different home network.
-2. Check startup output: `TURN relay: configured`. If it says `missing`, confirm
+2. Check startup output: `TURN relay: configured`. If it says `not configured`, confirm
    the deployed Function variables and unset any local ICE override.
 3. Set `PARTY_RELAY_ONLY=1` on both devices, restart, then verify playback. This
    forces the relay path and prevents a direct connection masking a broken relay.
@@ -92,5 +131,6 @@ must implement the same request before creating their own peer connection.
 A passing unit test or local loopback test cannot prove this Internet relay path.
 It needs a running TURN server and the real two-network test above.
 
-References: [WebRTC TURN](https://webrtc.org/getting-started/turn-server),
+References: [Cloudflare public STUN](https://developers.cloudflare.com/realtime/turn/faq/),
+[WebRTC TURN](https://webrtc.org/getting-started/turn-server),
 [coturn authentication](https://github.com/coturn/coturn/blob/master/README.turnserver).

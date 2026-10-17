@@ -192,8 +192,10 @@ int runParty(int argc, char** argv) {
                 if (kind == "ice") {
                     ice = iceConfigFromServers(event.at("iceServers"));
                     const bool relay = std::any_of(ice.iceServers.begin(), ice.iceServers.end(), [](const auto& s) { return s.type == rtc::IceServer::Type::Turn; });
-                    std::cout << "ICE servers: " << ice.iceServers.size() << ", TURN relay: " << (relay ? "configured" : "missing") << '\n';
-                    if (!relay) std::cerr << "Cross-network connections may fail: configure TURN on the Party backend.\n";
+                    const bool stun = std::any_of(ice.iceServers.begin(), ice.iceServers.end(), [](const auto& s) { return s.type == rtc::IceServer::Type::Stun; });
+                    std::cout << "ICE servers: " << ice.iceServers.size() << ", STUN discovery: " << (stun ? "enabled" : "disabled")
+                              << ", TURN relay: " << (relay ? "configured" : "not configured; using direct connections") << '\n';
+                    if (!stun && !relay) std::cerr << "No public-address discovery configured; cross-network connections may fail.\n";
                 }
                 if (kind == "closed") { std::cerr << "Room unavailable: " << event.value("code", "closed") << '\n'; quitting = true; break; }
                 if(kind=="coordination-lost" || kind=="rejoined") {

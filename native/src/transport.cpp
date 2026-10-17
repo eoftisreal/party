@@ -3,6 +3,17 @@
 #include <iostream>
 #include <stdexcept>
 namespace party {
+namespace {
+const char* candidateTypeName(rtc::Candidate::Type type) {
+    switch (type) {
+    case rtc::Candidate::Type::Host: return "host";
+    case rtc::Candidate::Type::ServerReflexive: return "srflx";
+    case rtc::Candidate::Type::PeerReflexive: return "prflx";
+    case rtc::Candidate::Type::Relayed: return "relay";
+    default: return "unknown";
+    }
+}
+}
 void BoundedPacer::outgoing(rtc::message_vector& messages, const rtc::message_callback& send) {
     std::lock_guard lock(mutex_); send_ = send;
     rtc::message_vector controls;
@@ -46,6 +57,10 @@ std::shared_ptr<Peer> Peer::create(bool host, const rtc::Configuration& config, 
 }
 void Peer::init(const rtc::Configuration& config, FrameCallback frame, std::function<void(Json)> control) {
     onControl_ = std::move(control);
+    for (const auto& server : config.iceServers) {
+        if (server.type == rtc::IceServer::Type::Stun) ++stunServers_;
+        if (server.type == rtc::IceServer::Type::Turn) ++turnServers_;
+    }
     pc_ = std::make_shared<rtc::PeerConnection>(config);
     const auto weak = weak_from_this();
     pc_->onStateChange([weak](auto state) { if (auto self = weak.lock()) { self->state_ = state; if (state == rtc::PeerConnection::State::Connected) { int64_t unset = 0; self->connectedUs_.compare_exchange_strong(unset, nowUs()); } } });
@@ -54,6 +69,8 @@ void Peer::init(const rtc::Configuration& config, FrameCallback frame, std::func
     }});
     pc_->onLocalCandidate([weak](const rtc::Candidate& c) { if (auto self = weak.lock()) {
         std::lock_guard lock(self->mutex_);
+        auto& count = self->localCandidateCounts_[candidateTypeName(c.type())];
+        count = count.get<unsigned>() + 1;
         if(self->outbound_.size()>=128){++self->sendFailures;self->state_=rtc::PeerConnection::State::Failed;return;}
         self->outbound_.push_back({{"type", "candidate"}, {"payload", {{"candidate", std::string(c)}, {"mid", c.mid()}}}});
     }});
@@ -142,7 +159,7 @@ bool Peer::signal(const Json& message) {
         const auto key=mid+"\n"+candidate;
         if(appliedCandidates_.contains(key)) return true;
         if(appliedCandidates_.size()>=128) throw std::runtime_error("Too many ICE candidates");
-        pc_->addRemoteCandidate(rtc::Candidate(candidate,mid));appliedCandidates_.insert(key);
+        pc_->addRemoteCandidate(rtc::Candidate(candidate,mid));appliedCandidates_.insert(key);++remoteTrickleCandidatesApplied_;
     } else if((type=="offer" && !host_) || (type=="answer" && host_)) {
         const auto sdp=payload.at("sdp").get<std::string>();
         if(sdp.size()>60000) throw std::invalid_argument("SDP too large");
@@ -218,9 +235,22 @@ Json Peer::stats() const {
     result["connectMs"] = connectedUs_.load() ? (connectedUs_.load()-createdUs_)/1000 : -1;
     result["maxBitrate"] = maxBitrate_;
     if (const auto rtt = pc_->rtt()) result["sctpRttMs"] = rtt->count();
+    result["stunServersConfigured"] = stunServers_;
+    result["turnServersConfigured"] = turnServers_;
+    result["iceGatheringComplete"] = pc_->gatheringState() == rtc::PeerConnection::GatheringState::Complete;
+    result["connectionPath"] = "unselected";
     rtc::Candidate local, remote;
-    if (pc_->getSelectedCandidatePair(&local, &remote)) result["candidateTypes"] = {int(local.type()), int(remote.type())};
+    if (pc_->getSelectedCandidatePair(&local, &remote)) {
+        result["candidateTypes"] = {int(local.type()), int(remote.type())};
+        result["selectedCandidateTypes"] = {candidateTypeName(local.type()), candidateTypeName(remote.type())};
+        if (local.type() == rtc::Candidate::Type::Relayed || remote.type() == rtc::Candidate::Type::Relayed)
+            result["connectionPath"] = "relay";
+        else if (local.type() != rtc::Candidate::Type::Unknown && remote.type() != rtc::Candidate::Type::Unknown)
+            result["connectionPath"] = "direct";
+    }
     std::lock_guard lock(mutex_);
+    result["localCandidates"] = localCandidateCounts_;
+    result["remoteTrickleCandidatesApplied"] = remoteTrickleCandidatesApplied_.load();
     if (videoReceiver_) result["video"] = videoReceiver_->stats->json();
     if (audioReceiver_) result["audio"] = audioReceiver_->stats->json();
     if (pacer_) { result["rtpVideoBytesSent"] = pacer_->bytesSent.load(); result["pacerQueueUs"] = pacer_->queueUs(); result["pacerDroppedPackets"] = pacer_->dropped.load(); result["pacerEpochDiscardedPackets"]=pacer_->discarded.load(); }

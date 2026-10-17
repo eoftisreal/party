@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
-import { iceSettings } from '../src/ice.js';
+import { iceSettings, defaultStunUrls } from '../src/ice.js';
 import { makeHandler } from '../src/http.js';
 import { fixture } from './fixture.js';
 const env = { PARTY_STUN_URLS: '["stun:relay.example:3478"]', PARTY_TURN_URLS: '["turn:relay.example:3478?transport=udp"]', PARTY_TURN_SECRET: 'test-only-secret-'.repeat(3) };
@@ -18,9 +18,17 @@ test('temporary credentials match coturn and bind to session, room, user and exp
   assert.notEqual(settings('room', 'host', 'session').iceServers[1].credential, turn.credential);
   assert.equal(JSON.stringify(a).includes(env.PARTY_TURN_SECRET), false);
 });
-test('missing configuration is explicit and unsupported configuration fails closed', () => {
-  assert.deepEqual(iceSettings({})('r', 'u', 's').iceServers, []);
-  assert.equal(iceSettings({})('r', 'u', 's').turnConfigured, false);
+test('default enables public address discovery without TURN or credentials; explicit opt-out is respected', () => {
+  const settings = iceSettings({})('r', 'u', 's');
+  assert.deepEqual(settings.iceServers, defaultStunUrls.map(url => ({ url })));
+  assert.equal(settings.turnConfigured, false);
+  assert.equal(JSON.stringify(settings).includes('credential'), false);
+  for (const raw of ['[]', ''])
+    assert.deepEqual(iceSettings({ PARTY_STUN_URLS: raw })('r', 'u', 's').iceServers, []);
+  assert.deepEqual(iceSettings({ PARTY_STUN_URLS: '["stun:custom.example:3478"]' })('r', 'u', 's').iceServers,
+    [{ url: 'stun:custom.example:3478' }]);
+});
+test('unsupported configuration fails closed', () => {
   for (const change of [
     { PARTY_TURN_SECRET: '' }, { PARTY_TURN_SECRET: 'short' },
     { PARTY_TURN_URLS: 'bad-json' }, { PARTY_TURN_URLS: '{}' },

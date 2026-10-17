@@ -128,6 +128,12 @@ int main(int argc, char** argv) {
         }
         require(played && paused && resumed && sought && backward && forwardAgain && reconnected && secondPlayed && stopped, "Control/reconnection sequence did not complete");
         require(deferredIce>0 && duplicateSdp>=4,"Real candidate-before-SDP retry/duplicate scenario did not run");
+        for (const auto& p : {host, viewer}) {
+            const auto network = p->stats();
+            require(network.at("connectionPath") == "direct", "Loopback was not classified as a direct connection");
+            require(network.at("localCandidates").at("host").get<unsigned>() > 0, "Host candidate discovery was not reported");
+            require(network.at("turnServersConfigured") == 0, "Loopback unexpectedly configured a relay");
+        }
         const auto stats = player.stats();
         require(stats.at("renderedVideoFrames").get<uint64_t>() > videoBeforeReconnect+20, "Video did not recover after new ICE connection");
         require(stats.at("audioEnergy").get<double>() > 1.0, "Decoded audio is silent");
