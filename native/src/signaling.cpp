@@ -208,6 +208,7 @@ void Signaling::run(std::stop_token stop) {
     while(!stop.stop_requested() && !eventOverflow) {
         try {
             if(renewal){renewSession();continue;}
+            refreshIce(); // Obtain ICE settings before negotiating new peers.
             const auto now=nowUs();
             // Realtime is optional. Its connection errors must never block the authoritative HTTP path.
             if(api_ && (!realtime_ || realtime_->isClosed()) && now-lastRealtime>10000000) {
