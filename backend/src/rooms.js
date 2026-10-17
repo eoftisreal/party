@@ -8,9 +8,11 @@ export const peerId = (room, user) => digest(`peer:${room}:${user}`).slice(0, 32
 export const reconnectWindowMs = 30 * 60 * 1000;
 export const idPattern = /^[a-f0-9]{32}$/;
 export function fail(status, code, message) { throw new ApiError(status, code, message); }
-export function makeRoomsService(store, { now = () => Date.now(), random = randomBytes, createLimitPerHour = 0 } = {}) {
+export function makeRoomsService(store, { now = () => Date.now(), random = randomBytes, createLimitPerHour = 0, maxViewers = 5 } = {}) {
   if (!Number.isSafeInteger(createLimitPerHour) || createLimitPerHour < 0 || createLimitPerHour > 10000)
     throw Error('Invalid createLimitPerHour (expected integer 0..10000)');
+  if (!Number.isSafeInteger(maxViewers) || maxViewers < 1 || maxViewers > 16)
+    throw Error('Invalid maxViewers (expected integer 1..16)');
   const token = () => random(16).toString('hex');
   const timestamp = () => new Date(now()).toISOString();
   async function get(s, id) {
@@ -53,7 +55,7 @@ export function makeRoomsService(store, { now = () => Date.now(), random = rando
     fail(409, 'RETRY', 'Room changed while reading; retry request');
   }
   function safe(r, ms, user, session) {
-    return { roomId: r.$id, title: r.title, hostId: r.hostId, status: r.status, expiresAt: r.expiresAt,
+    return { roomId: r.$id, title: r.title, hostId: r.hostId, status: r.status, expiresAt: r.expiresAt, maxViewers,
       participants: ms.map(m => ({ userId: m.userId, joinedAt: m.joinedAt, online: Date.parse(m.lastSeenAt) + 120000 > now(), ...(r.hostId === user ? { sessionVersion: digest(m.sessionId || '') } : {}) })),
       yourUserId: user, yourRole: r.hostId === user ? 'host' : 'viewer', ...(session ? { sessionId: session } : {}), serverTimeMs: now() };
   }
@@ -116,11 +118,11 @@ export function makeRoomsService(store, { now = () => Date.now(), random = rando
           const a = Buffer.from(digest(invite), 'hex'), b = Buffer.from(r.inviteHash, 'hex');
           if (a.length !== b.length || !timingSafeEqual(a, b)) fail(403, 'INVALID_INVITE', 'Invalid invite');
           const members = await s.listMembers(id);
-          // One host + one viewer; stale viewers are explicitly removed before admitting another.
+          // One host + configurable viewers; stale viewers are explicitly removed before admitting another.
           for (const m of members) if (m.userId !== r.hostId && Date.parse(m.lastSeenAt) + reconnectWindowMs <= now()) {
             await revoke(s, id, m.userId); await s.deleteMember(memberId(id, m.userId));
           }
-          if ((await s.listMembers(id)).length >= 2) fail(409, 'ROOM_FULL', 'Prototype supports one viewer');
+          if ((await s.listMembers(id)).length >= maxViewers + 1) fail(409, 'ROOM_FULL', 'Watch party is full');
         } else await revoke(s, id, user);
         const sessionId = renewed || token();
         const m = { roomId: id, userId: user, joinedAt: existing?.joinedAt || timestamp(), lastSeenAt: timestamp(), sessionId, rateWindow: 0, rateCount: 0 };
@@ -136,10 +138,21 @@ export function makeRoomsService(store, { now = () => Date.now(), random = rando
       return inspect(id, user, session, async (s, room) => {
         const members=await s.listMembers(id);
         const peers=await s.listPeers(id);
-        const p=peers.find(p=>members.some(m=>m.userId===p.hostId && m.sessionId===p.hostSession) &&
-          members.some(m=>m.userId===p.viewerId && m.sessionId===p.viewerSession));
-        const connection=p?{generation:p.generation,viewerId:p.viewerId,state:members.every(m=>Date.parse(m.lastSeenAt)+120000>now())?p.state:'closed'}:null;
-        return {...safe(room,members,user),connection};
+        // Each viewer has an independent generation and session. A stopped viewer
+        // must not terminate the other viewer connections.
+        const live = peers.filter(p => members.some(m => m.userId === p.hostId && m.sessionId === p.hostSession) &&
+          members.some(m => m.userId === p.viewerId && m.sessionId === p.viewerSession));
+        const connections = live.map(p => {
+          const host = members.find(m => m.userId === p.hostId);
+          const viewer = members.find(m => m.userId === p.viewerId);
+          const online = [host, viewer].every(m => Date.parse(m.lastSeenAt) + 120000 > now());
+          return { generation: p.generation, viewerId: p.viewerId, state: online ? p.state : 'closed' };
+        });
+        const visible = user === room.hostId ? connections : connections.filter(p => p.viewerId === user);
+        return { ...safe(room, members, user),
+          connections: visible,
+          // Backward compatible for a single viewer and existing client integrations.
+          connection: visible.length === 1 ? visible[0] : null };
       }, Boolean(session));
     },
     async heartbeat(id, user, session) {
