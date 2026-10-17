@@ -235,12 +235,11 @@ void Peer::close() {
     pc_->resetCallbacks(); pc_->close();
 }
 Peer::~Peer() { close(); }
-rtc::Configuration iceConfigFromEnvironment() {
+rtc::Configuration iceConfigFromServers(const Json& servers) {
     rtc::Configuration cfg; cfg.disableAutoNegotiation = true;
     cfg.mtu = 1200; cfg.maxMessageSize = 16384;
     if(const auto bind=env("PARTY_BIND_ADDRESS");!bind.empty()) cfg.bindAddress=bind;
-    if (const auto raw = env("PARTY_ICE_SERVERS"); !raw.empty()) {
-        const auto servers = Json::parse(raw);
+    {
         if (!servers.is_array() || servers.size() > 8) throw std::invalid_argument("Invalid ICE server configuration");
         unsigned turns = 0, stuns = 0;
         for (const auto& s : servers) {
@@ -259,5 +258,9 @@ rtc::Configuration iceConfigFromEnvironment() {
         cfg.iceTransportPolicy = rtc::TransportPolicy::Relay;
     }
     return cfg;
+}
+rtc::Configuration iceConfigFromEnvironment() {
+    const auto raw = env("PARTY_ICE_SERVERS");
+    return iceConfigFromServers(raw.empty() ? Json::array() : Json::parse(raw));
 }
 }

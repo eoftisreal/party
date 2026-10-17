@@ -70,3 +70,5 @@ Deploy Appwrite and set `PARTY_FUNCTION_URL`; account-free guest sessions are th
 ```
 
 Windows equivalents and DLL/dependency setup are in the Windows guide. Host commands: `play`, `pause`, `seek 120`, `stop`, `stats`, `quit`. `--software` selects libx264; `--headless` is useful for testing with a configured dummy audio device. Default scope is one host + one viewer, SDR up to 1080p, stereo audio. No download endpoints or original-file transfers are implemented.
+
+For devices on different networks, configure a TURN relay centrally using [the cross-network setup guide](docs/TURN.md). The native player automatically fetches temporary credentials after joining.

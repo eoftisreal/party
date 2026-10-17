@@ -8,7 +8,7 @@
   },
   "scripts": {
     "test": "node --test test/*.test.js",
-    "check": "node --check src/main.js && node --check src/rooms.js && node --check src/signaling.js && node --check src/store.js && node --check src/http.js && node --check src/diagnostics.js && node --check tools/smoke.js"
+    "check": "node --check src/ice.js && node --check src/main.js && node --check src/rooms.js && node --check src/signaling.js && node --check src/store.js && node --check src/http.js && node --check src/diagnostics.js && node --check tools/smoke.js"
   },
   "dependencies": {
     "node-appwrite": "23.1.0"

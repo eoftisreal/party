@@ -164,7 +164,20 @@ void Signaling::run(std::stop_token stop) {
         }
         events_.push_back(std::move(value));
     };
+    int64_t iceRefreshAt = 0;
+    auto refreshIce = [&] {
+        // Fetch on the HTTP worker before publishing room authority or offers.
+        // Explicit local settings remain available for diagnostics and older backends.
+        if (!api_ || !env("PARTY_ICE_SERVERS").empty() || nowUs() < iceRefreshAt) return;
+        auto settings = request("GET", "/ice");
+        const auto ttl = settings.at("ttlSeconds").get<int64_t>();
+        if (!settings.at("iceServers").is_array() || ttl < 300 || ttl > 86400)
+            throw std::runtime_error("Invalid backend ICE settings");
+        settings["event"] = "ice"; event(settings);
+        iceRefreshAt = nowUs() + (ttl - 60) * 1000000;
+    };
     auto snapshot=[&](Json room) {
+        refreshIce();
         const auto connection=room.value("connection",Json());
         std::string generation,sender; bool closed=true;
         if(connection.is_object()) {
@@ -180,6 +193,7 @@ void Signaling::run(std::stop_token stop) {
         {std::lock_guard lock(mutex_);commands_.clear();delivery_.clear();}
         room["event"]="rejoined";event(room);suspended=false;leaseRefresh=joinedAt;
         leaseDeadlineUs_=joinedAt+options_.leaseUs*5/6;lastRoom=lastPoll=lastHeartbeat=0;
+        iceRefreshAt=0;
         renewal.reset();failures=0;commandFailures=0;commandRetryAt=0;
     };
     while(!stop.stop_requested() && !eventOverflow) {

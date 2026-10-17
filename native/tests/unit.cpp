@@ -1,11 +1,23 @@
 #include "party/core.hpp"
 #include "party/rtp.hpp"
+#include "party/transport.hpp"
 #include <iostream>
 #include <stdexcept>
 namespace { void expect(bool v, const char* what) { if (!v) throw std::runtime_error(what); } }
 int main() {
     using namespace party;
     try {
+        const auto ice = iceConfigFromServers(Json::array({
+            {{"url", "stun:relay.example:3478"}},
+            {{"url", "turn:relay.example:3478?transport=udp"}, {"username", "temporary"}, {"credential", "temporary-secret"}}
+        }));
+        expect(ice.iceServers.size() == 2 && ice.disableAutoNegotiation, "backend ICE configuration lost");
+        expect(ice.iceServers[1].username == "temporary" && ice.iceServers[1].password == "temporary-secret", "TURN credentials lost");
+        for (const auto& servers : {Json::object(), Json::array({{{"url", "turn:relay.example:3478"}, {"username", ""}, {"credential", ""}}})}) {
+            bool rejected = false;
+            try { iceConfigFromServers(servers); } catch (const std::exception&) { rejected = true; }
+            expect(rejected, "invalid backend ICE configuration accepted");
+        }
         ClockEstimator clock;
         expect(clock.sample(1000000,1051000,1052000,1004000), "clock sample");
         expect(clock.offsetUs() == 49500 && clock.rttUs() == 3000, "NTP estimator arithmetic");
