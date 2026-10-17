@@ -7,6 +7,10 @@ namespace { void expect(bool v, const char* what) { if (!v) throw std::runtime_e
 int main() {
     using namespace party;
     try {
+        const auto directIce = iceConfigFromServers(Json::array({{{"url", "stun:stun.cloudflare.com:3478"}}}));
+        expect(directIce.iceServers.size() == 1 && directIce.iceServers[0].type == rtc::IceServer::Type::Stun,
+               "STUN-only discovery must not configure a relay");
+        expect(directIce.iceTransportPolicy != rtc::TransportPolicy::Relay, "Direct candidates must remain enabled");
         const auto ice = iceConfigFromServers(Json::array({
             {{"url", "stun:relay.example:3478"}},
             {{"url", "turn:relay.example:3478?transport=udp"}, {"username", "temporary"}, {"credential", "temporary-secret"}}

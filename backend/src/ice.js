@@ -1,6 +1,9 @@
 import { createHmac } from 'node:crypto';
 import { ApiError, digest } from './rooms.js';
 
+// Address discovery only: this service never carries the movie.
+export const defaultStunUrls = ['stun:stun.cloudflare.com:3478'];
+
 // The bundled libjuice transport accepts one STUN and two UDP TURN entries.
 export function iceSettings(env = process.env, now = Date.now) {
   return (roomId, user, session) => {
@@ -13,7 +16,8 @@ export function iceSettings(env = process.env, now = Date.now) {
           !new RegExp(`^${scheme}:(?:[a-zA-Z0-9.-]+|\\[[a-fA-F0-9:]+\\])(?::[0-9]{1,5})?(?:\\?transport=udp)?$`).test(url))) return unavailable();
       return urls;
     };
-    const stun = parse(env.PARTY_STUN_URLS, 'stun', 1);
+    // Undefined means normal Internet discovery. Explicit [] (or empty) opts out.
+    const stun = parse(env.PARTY_STUN_URLS ?? JSON.stringify(defaultStunUrls), 'stun', 1);
     const turn = parse(env.PARTY_TURN_URLS, 'turn', 2);
     const ttl = Number(env.PARTY_TURN_TTL_SECONDS ?? 3600);
     if (!Number.isInteger(ttl) || ttl < 300 || ttl > 86400 ||

@@ -71,6 +71,9 @@ private:
     std::deque<Json> outbound_;
     std::string remoteSdp_;
     std::set<std::string> appliedCandidates_;
+    Json localCandidateCounts_ = {{"host", 0}, {"srflx", 0}, {"prflx", 0}, {"relay", 0}, {"unknown", 0}};
+    unsigned stunServers_ = 0, turnServers_ = 0;
+    std::atomic<unsigned> remoteTrickleCandidatesApplied_{0};
     int64_t appliedCutoffUs_=0;
     std::function<void(Json)> onControl_;
     BitrateController controller_;
