@@ -319,7 +319,7 @@ int runParty(int argc, char** argv) {
                         if (host) {
                             const std::string viewer = event.at("from");
                             if (auto it = hostPeers.find(viewer); it != hostPeers.end() &&
-                                it->second.generation == event.at("generation"))
+                                it->second.generation == event.at("generation").get<std::string>())
                                 applied = it->second.peer->signal(event);
                         } else {
                             if (event.at("type") == "offer" && event.at("generation") != generation) {
