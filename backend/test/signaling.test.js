@@ -60,9 +60,10 @@ test('strict schemas reject unencrypted SDP, wrong direction, malformed ICE and 
 });
 test('serialized concurrent joins enforce capacity; failed transaction rolls back',async()=>{
   const f=fixture(),r=await f.rooms.create('host');
-  const results=await Promise.allSettled(['one','two'].map(user=>f.rooms.join(r.roomId,user,r.inviteCode)));
-  assert.equal(results.filter(x=>x.status==='fulfilled').length,1);
-  assert.equal(f.ms.size,2);
+  const results=await Promise.allSettled(['one','two','three','four','five','six'].map(user=>f.rooms.join(r.roomId,user,r.inviteCode)));
+  assert.equal(results.filter(x=>x.status==='fulfilled').length,5);
+  assert.equal(results.filter(x=>x.status==='rejected' && x.reason.code==='ROOM_FULL').length,1);
+  assert.equal(f.ms.size,6);
   await assert.rejects(f.store.atomic(async s=>{await s.updateRoom(r.roomId,{status:'closed'});throw Error('abort');}));
   assert.equal(f.rs.get(r.roomId).status,'open');
 });

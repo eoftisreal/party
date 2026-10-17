@@ -1,11 +1,15 @@
 #pragma once
 #include "party/core.hpp"
 #include <map>
+#include <tuple>
+#include <vector>
 namespace party {
 // Used under Signaling's mutex. Only the application can mark a message applied.
 class SignalDelivery {
 public:
     void authorize(std::string generation, std::string sender, bool closed);
+    // (sender, generation, closed). Host tracks every viewer independently.
+    void authorizeConnections(const std::vector<std::tuple<std::string, std::string, bool>>& connections);
     void ingest(const Json& messages, int64_t time);
     std::vector<Json> ready(int64_t time);
     void processed(const std::string& id, bool success, int64_t time);
@@ -17,7 +21,6 @@ private:
     enum class State { Pending, Processing, Applied, Acked };
     struct Entry { Json message; State state = State::Pending; int64_t readyAt = 0, expiresAt = 0; unsigned retries = 0; };
     std::map<std::string, Entry> entries_;
-    std::string generation_, sender_;
-    bool closed_ = true;
+    std::map<std::string, std::pair<std::string, bool>> connections_;
 };
 }

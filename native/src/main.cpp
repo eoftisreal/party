@@ -6,7 +6,10 @@
 #include <csignal>
 #include <cmath>
 #include <iostream>
+#include <map>
 #include <set>
+#include <unordered_map>
+#include <unordered_set>
 #include <thread>
 #ifdef _WIN32
 #include <conio.h>
@@ -126,40 +129,75 @@ int runParty(int argc, char** argv) {
         std::cout << "Room: " << room.at("roomId").get<std::string>() << '\n';
         if (room.contains("inviteCode")) std::cout << "Invite (share privately): " << room.at("inviteCode").get<std::string>() << '\n';
         Signaling signaling(std::move(api), room, host);
-        std::shared_ptr<Peer> peer;
+        struct HostSlot {
+            std::shared_ptr<Peer> peer;
+            std::string generation, sessionVersion;
+            int64_t started = 0, disconnectedSince = 0;
+            bool wasConnected = false;
+        };
+        // Host slots are owned by the main loop. Only this map is accessed by media
+        // and WebRTC callback threads, and it is always protected by peerMutex.
+        std::map<std::string, HostSlot> hostPeers;
+        std::unordered_map<std::string, std::shared_ptr<Peer>> senderPeers;
         std::mutex peerMutex;
+        std::shared_ptr<Peer> peer; // Viewer role has exactly one host connection.
         std::unique_ptr<Player> player;
         std::unique_ptr<MediaSource> source;
-        std::string remoteUser, generation, authorizing, remoteSessionVersion;
+        std::string remoteUser, generation;
+        std::set<std::string> authorizing;
 
+        auto syncSenderPeers = [&] {
+            std::lock_guard lock(peerMutex);
+            senderPeers.clear();
+            for (const auto& [viewer, slot] : hostPeers)
+                if (slot.peer) senderPeers.emplace(viewer, slot.peer);
+        };
+        auto clearPeers = [&] {
+            for (auto& [viewer, slot] : hostPeers) if (slot.peer) slot.peer->close();
+            hostPeers.clear();
+            syncSenderPeers();
+            if (peer) peer->close();
+            peer.reset();
+        };
         std::atomic<int64_t> lastRemoteKeyframe{0};
         ScopeExit cleanup{[&] {
-            if (peer) peer->close();
+            if (source) source->pause();
+            clearPeers();
             source.reset(); // Join producer before freeing Player or callback targets.
             signaling.stop();
             player.reset();
         }};
-        signaling.start(); // Also leaves/closes the room if media/device initialization fails.
+        signaling.start();
         if (!host || preview) player = std::make_unique<Player>(headless);
         if (host && player) { const auto time = nowUs(); player->clock.sample(time,time,time,time); }
         if (host) source = std::make_unique<MediaSource>(file, media, [&](EncodedFrame frame) {
-            std::shared_ptr<Peer> current; { std::lock_guard lock(peerMutex); current = peer; }
+            std::vector<std::shared_ptr<Peer>> targets;
+            {
+                std::lock_guard lock(peerMutex);
+                targets.reserve(senderPeers.size());
+                for (const auto& [viewer, target] : senderPeers) targets.push_back(target);
+            }
             if (player) player->push(frame);
-            if (current) current->send(frame);
+            for (const auto& target : targets) target->send(frame);
         });
         const auto mediaReadyMs = (nowUs()-setupStarted)/1000;
-        auto createPeer = [&] {
+        auto createPeer = [&](std::string viewerId) {
             signaling.connecting(true);
-            return Peer::create(host, ice, [&](EncodedFrame frame) { if (player) player->push(std::move(frame)); }, [&](Json message) {
+            return Peer::create(host, ice, [&](EncodedFrame frame) {
+                if (player) player->push(std::move(frame));
+            }, [&, viewerId](Json message) {
                 const auto type = message.value("type", "");
                 if (host) {
                     if (type == "ping" && message.contains("t0") && message["t0"].is_number_integer()) {
-                        const int64_t t1 = nowUs(); const int64_t t0 = message["t0"];
+                        const int64_t t1 = nowUs(), t0 = message["t0"];
                         if (t0 < 0) return;
-                        std::shared_ptr<Peer> current; { std::lock_guard lock(peerMutex); current = peer; }
-                        if (current) current->control({{"type", "pong"}, {"t0", t0}, {"t1", t1}, {"t2", nowUs()}});
-                    } else if (type == "keyframe" && nowUs()-lastRemoteKeyframe.load() > 250000) { lastRemoteKeyframe = nowUs(); source->keyframe(); }
-                    // Viewer state/play/seek commands are deliberately ignored.
+                        std::shared_ptr<Peer> target;
+                        { std::lock_guard lock(peerMutex); if (auto it = senderPeers.find(viewerId); it != senderPeers.end()) target = it->second; }
+                        if (target) target->control({{"type", "pong"}, {"t0", t0}, {"t1", t1}, {"t2", nowUs()}});
+                    } else if (type == "keyframe" && nowUs()-lastRemoteKeyframe.load() > 250000) {
+                        lastRemoteKeyframe = nowUs(); source->keyframe();
+                    }
+                    // Never accept viewer playback or seek commands.
                 } else if (type == "state" || type == "pong") {
                     if (type == "pong") message["t3"] = nowUs();
                     player->control(message);
@@ -168,9 +206,10 @@ int runParty(int argc, char** argv) {
         };
         std::signal(SIGINT, interrupt); std::signal(SIGTERM, interrupt);
         std::cout << (host ? "Commands: play, pause, seek SECONDS, stop, stats, quit\n" : "Commands: stats, quit\n");
-        int64_t peerStarted = 0, disconnectedSince = 0, lastState = 0, lastPing = 0, lastStats = 0;
-        bool wasConnected = false, wantsPlay = true, coordinationActive=true, restartRequired=false;
-        uint64_t sentEpoch=UINT64_MAX;
+        int64_t peerStarted = 0, lastState = 0, lastPing = 0, lastStats = 0;
+        bool wasConnected = false, wantsPlay = true, coordinationActive = true, restartRequired = false;
+        bool streamingActive = false, negotiating = false;
+        uint64_t sentEpoch = UINT64_MAX;
         LoopPacer loopPacer;
         int64_t lastLoopStart = 0, maxLoopIntervalUs = 0;
         uint64_t loopIntervals = 0, lateLoopIntervals = 0;
@@ -197,93 +236,182 @@ int runParty(int argc, char** argv) {
                               << ", TURN relay: " << (relay ? "configured" : "not configured; using direct connections") << '\n';
                     if (!stun && !relay) std::cerr << "No public-address discovery configured; cross-network connections may fail.\n";
                 }
-                if (kind == "closed") { std::cerr << "Room unavailable: " << event.value("code", "closed") << '\n'; quitting = true; break; }
-                if(kind=="coordination-lost" || kind=="rejoined") {
-                    if(source) {source->pause();}
-                    if(peer)peer->close();
-                    {std::lock_guard lock(peerMutex);peer.reset();}
-                    if(player){player->reset();if(host){const auto t=nowUs();player->clock.sample(t,t,t,t);}}
-                    authorizing.clear();remoteUser.clear();generation.clear();wasConnected=false;disconnectedSince=0;
-                    restartRequired=true;coordinationActive=kind=="rejoined" && signaling.leaseHealthy();
+                if (kind == "closed") {
+                    std::cerr << "Room unavailable: " << event.value("code", "closed") << '\n';
+                    quitting = true; break;
                 }
-                if(kind=="coordination-restored") coordinationActive=signaling.leaseHealthy();
-                if (kind == "error") { std::cerr << "Signaling rejected: " << event.value("code", "error") << '\n'; authorizing.clear(); }
+                if (kind == "coordination-lost" || kind == "rejoined") {
+                    if (source) source->pause();
+                    clearPeers();
+                    if (player) { player->reset(); if (host) { const auto t = nowUs(); player->clock.sample(t,t,t,t); } }
+                    authorizing.clear(); remoteUser.clear(); generation.clear(); wasConnected = false;
+                    streamingActive = false; negotiating = false;
+                    restartRequired = true; coordinationActive = kind == "rejoined" && signaling.leaseHealthy();
+                }
+                if (kind == "coordination-restored") coordinationActive = signaling.leaseHealthy();
+                if (kind == "error") {
+                    std::cerr << "Signaling rejected: " << event.value("code", "error") << '\n';
+                    // A retryable authorization failure must not block later room updates.
+                    authorizing.clear();
+                }
                 if (kind == "room" && host && coordinationActive) {
                     const auto& members = event.at("participants");
-                    bool online = false;
-                    for (const auto& m : members) if (m.at("userId") != signaling.userId() && m.at("online") == true) {
-                        online = true;
-                        const auto connection=event.value("connection",Json());
-                        if(peer && connection.is_object() && connection.value("generation","")==generation && connection.value("state","")=="closed") {
-                            source->pause();peer->close();
-                            {std::lock_guard lock(peerMutex);peer.reset();}wasConnected=false;
+                    const auto connections = event.value("connections", Json::array());
+                    std::unordered_set<std::string> online;
+                    for (const auto& member : members) {
+                        const std::string viewer = member.at("userId");
+                        if (viewer == signaling.userId() || member.at("online") != true) continue;
+                        online.insert(viewer);
+                        const auto version = member.value("sessionVersion", "");
+                        if (auto it = hostPeers.find(viewer); it != hostPeers.end()) {
+                            if (it->second.sessionVersion.empty()) it->second.sessionVersion = version;
+                            bool invalid = it->second.sessionVersion != version;
+                            // Only keep a peer whose generation still belongs to this viewer.
+                            // A replaced/expired session may disappear from the snapshot entirely.
+                            bool currentGeneration = false;
+                            for (const auto& c : connections) if (c.value("viewerId", "") == viewer &&
+                                c.value("generation", "") == it->second.generation &&
+                                c.value("state", "") != "closed") currentGeneration = true;
+                            if (!currentGeneration) invalid = true;
+                            if (invalid) {
+                                it->second.peer->close();
+                                hostPeers.erase(it);
+                                syncSenderPeers();
+                            }
                         }
-                        const auto sessionVersion = m.value("sessionVersion", "");
-                        if (peer && m.at("userId") == remoteUser && !remoteSessionVersion.empty() && remoteSessionVersion != sessionVersion) {
-                            source->pause(); peer->close();
-                            { std::lock_guard lock(peerMutex); peer.reset(); }
-                            wasConnected = false;
-                        }
-                        remoteSessionVersion = sessionVersion;
-                        if (authorizing.empty() && (!peer || m.at("userId") != remoteUser)) {
-                            authorizing = m.at("userId").get<std::string>(); signaling.authorize(authorizing,restartRequired);
+                        if (!hostPeers.contains(viewer) && !authorizing.contains(viewer)) {
+                            authorizing.insert(viewer);
+                            signaling.authorize(viewer, restartRequired);
                         }
                     }
-                    if (!online && peer) {
-                        source->pause(); peer->close();
-                        { std::lock_guard lock(peerMutex); peer.reset(); }
-                        remoteUser.clear(); authorizing.clear(); wasConnected = false;
+                    for (auto it = hostPeers.begin(); it != hostPeers.end();) {
+                        if (!online.contains(it->first)) {
+                            it->second.peer->close();
+                            it = hostPeers.erase(it);
+                            syncSenderPeers();
+                        } else ++it;
                     }
+                    for (auto it = authorizing.begin(); it != authorizing.end();)
+                        if (!online.contains(*it)) it = authorizing.erase(it);
+                        else ++it;
                 }
                 if (kind == "authorized" && host && coordinationActive) {
-                    if(!signaling.current({{"generation",event.at("generation")},{"from",event.at("viewerId")},{"type","answer"}})){authorizing.clear();continue;}
-                    if (peer) peer->close();
-                    remoteUser = event.at("viewerId"); generation = event.at("generation");
-                    const auto next = createPeer(); { std::lock_guard lock(peerMutex); peer = next; }
-                    authorizing.clear();restartRequired=false; next->offer(); peerStarted = nowUs(); wasConnected = false; disconnectedSince=0; sentEpoch=UINT64_MAX;
+                    const std::string viewer = event.at("viewerId");
+                    authorizing.erase(viewer);
+                    if (!signaling.current({{"generation", event.at("generation")},{"from",viewer},{"type","answer"}}))
+                        continue;
+                    if (auto it = hostPeers.find(viewer); it != hostPeers.end()) {
+                        it->second.peer->close();
+                        hostPeers.erase(it);
+                    }
+                    HostSlot slot;
+                    slot.generation = event.at("generation");
+                    // The next room snapshot will check the actual membership session.
+                    // Capture the currently announced session version before creation.
+                    slot.started = nowUs();
+                    slot.peer = createPeer(viewer);
+                    hostPeers.emplace(viewer, std::move(slot));
+                    syncSenderPeers();
+                    hostPeers.at(viewer).peer->offer();
+                    restartRequired = false;
                 }
-                if(kind=="signal") {
-                    const auto id=event.at("messageId").get<std::string>();
-                    if(!signaling.current(event)){signaling.processed(id,true);continue;}
-                    bool applied=false;
+                if (kind == "signal") {
+                    const auto id = event.at("messageId").get<std::string>();
+                    if (!signaling.current(event)) { signaling.processed(id, true); continue; }
+                    bool applied = false;
                     try {
-                        if(!host && event.at("type")=="offer" && event.at("generation")!=generation) {
-                            if(peer)peer->close();player->reset();
-                            remoteUser=event.at("from");generation=event.at("generation");
-                            auto next=createPeer();{std::lock_guard lock(peerMutex);peer=next;}peerStarted=nowUs();
+                        if (host) {
+                            const std::string viewer = event.at("from");
+                            if (auto it = hostPeers.find(viewer); it != hostPeers.end() &&
+                                it->second.generation == event.at("generation").get<std::string>())
+                                applied = it->second.peer->signal(event);
+                        } else {
+                            if (event.at("type") == "offer" && event.at("generation") != generation) {
+                                if (peer) peer->close();
+                                player->reset();
+                                remoteUser = event.at("from");
+                                generation = event.at("generation");
+                                peer = createPeer(remoteUser); peerStarted = nowUs();
+                            }
+                            if (peer && event.at("generation") == generation && event.at("from") == remoteUser)
+                                applied = peer->signal(event);
                         }
-                        if(peer && event.at("generation")==generation && event.at("from")==remoteUser) applied=peer->signal(event);
-                    } catch(const std::exception&) {std::cerr<<"Signal application failed; retained for retry\n";}
-                    signaling.processed(id,applied);
+                    } catch (const std::exception&) { std::cerr << "Signal application failed; retained for retry\n"; }
+                    signaling.processed(id, applied);
                 }
             }
-            if (peer && coordinationActive) {
-                if(player)peer->receiveCutoffUs=player->cutoffUs.load();
+            if (coordinationActive && host) {
+                bool anyConnected = false, anyNegotiating = !authorizing.empty();
+                unsigned effectiveBitrate = media.maxBitrate;
+                for (auto& [viewer, slot] : hostPeers) {
+                    auto& current = slot.peer;
+                    current->pump();
+                    for (const auto& message : current->takeSignals())
+                        signaling.send(viewer, slot.generation, message);
+                    const bool connected = current->connected();
+                    if (connected) {
+                        anyConnected = true;
+                        effectiveBitrate = std::min(effectiveBitrate, current->targetBitrate.load());
+                        if (!slot.wasConnected) {
+                            source->keyframe();
+                            slot.disconnectedSince = 0;
+                        }
+                        if (current->forceKeyframe.exchange(false)) source->keyframe();
+                    } else {
+                        anyNegotiating = true;
+                        if (current->failed() && !slot.disconnectedSince) slot.disconnectedSince = nowUs();
+                        if (!authorizing.contains(viewer) &&
+                            ((slot.disconnectedSince && nowUs()-slot.disconnectedSince > 3000000) ||
+                             nowUs()-slot.started > 35000000)) {
+                            authorizing.insert(viewer);
+                            signaling.authorize(viewer, true);
+                            slot.started = nowUs();
+                            slot.disconnectedSince = 0;
+                        }
+                    }
+                    slot.wasConnected = connected;
+                }
+                if (anyNegotiating != negotiating) {
+                    signaling.connecting(anyNegotiating);
+                    negotiating = anyNegotiating;
+                }
+                // Joining a second viewer must not seek/restart the movie for the first.
+                if (anyConnected && !streamingActive) {
+                    source->seek(source->state().movieUs);
+                    if (wantsPlay) source->play();
+                    streamingActive = true;
+                    sentEpoch = UINT64_MAX;
+                } else if (!anyConnected && streamingActive) {
+                    source->pause();
+                    streamingActive = false;
+                }
+                if (anyConnected) {
+                    source->bitrate(effectiveBitrate);
+                    if (nowUs()-lastState > 100000) {
+                        const auto playback = source->state();
+                        if (sentEpoch != playback.epoch) {
+                            for (auto& [viewer, slot] : hostPeers) slot.peer->discardQueuedMedia();
+                            sentEpoch = playback.epoch;
+                        }
+                        const auto state = playback.json();
+                        for (auto& [viewer, slot] : hostPeers)
+                            if (slot.peer->connected()) slot.peer->control(state);
+                        if (player) player->control(state);
+                        lastState = nowUs();
+                    }
+                }
+            }
+            if (coordinationActive && !host && peer) {
+                peer->receiveCutoffUs = player->cutoffUs.load();
                 peer->pump();
                 for (const auto& message : peer->takeSignals()) signaling.send(remoteUser, generation, message);
                 const bool connected = peer->connected();
                 if (connected && !wasConnected) signaling.connecting(false);
                 if (!connected && wasConnected) signaling.connecting(true);
-                if (host && connected && !wasConnected) {
-                    source->seek(source->state().movieUs); if (wantsPlay) source->play(); source->keyframe(); disconnectedSince = 0;
-                }
-                if (host && peer->failed() && !disconnectedSince) {
-                    disconnectedSince = nowUs(); source->pause();
-                }
-                if (host && authorizing.empty() && ((disconnectedSince && nowUs()-disconnectedSince > 3000000) || (!connected && nowUs()-peerStarted > 35000000))) {
-                    authorizing = remoteUser; signaling.authorize(remoteUser, true); peerStarted = nowUs(); disconnectedSince = 0;
-                }
-                if (host && connected) {
-                    if (peer->forceKeyframe.exchange(false)) source->keyframe();
-                    source->bitrate(peer->targetBitrate);
-                    if (nowUs()-lastState > 100000) { const auto playback=source->state();
-                        if(sentEpoch!=playback.epoch){peer->discardQueuedMedia();sentEpoch=playback.epoch;}
-                        const auto state = playback.json(); peer->control(state); if (player) player->control(state); lastState = nowUs(); }
-                }
-                if (!host) {
+                if (connected) {
                     peer->hostAnchorUs = player->hostAnchorUs.load();
-                    if (connected && nowUs()-lastPing > 1000000) { peer->control(player->ping()); lastPing = nowUs(); }
-                    if (connected && player->needsKeyframe()) peer->control({{"type", "keyframe"}});
+                    if (nowUs()-lastPing > 1000000) { peer->control(player->ping()); lastPing = nowUs(); }
+                    if (player->needsKeyframe()) peer->control({{"type","keyframe"}});
                 }
                 wasConnected = connected;
             }
@@ -291,7 +419,7 @@ int runParty(int argc, char** argv) {
             if (source && !source->error().empty()) throw std::runtime_error(source->error());
             if (auto line = command()) {
                 if (*line == "quit") quitting = true;
-                else if (source && *line == "play") { wantsPlay = true; if(coordinationActive && peer && peer->connected()) source->play(); }
+                else if (source && *line == "play") { wantsPlay = true; if (coordinationActive && streamingActive) source->play(); }
                 else if (source && *line == "pause") { wantsPlay = false; source->pause(); }
                 else if (source && *line == "stop") { wantsPlay = false; source->stop(); }
                 else if (source && line->starts_with("seek ")) {
@@ -305,13 +433,31 @@ int runParty(int argc, char** argv) {
                 stats["loop"] = {{"intervals", loopIntervals}, {"maxIntervalUs", maxLoopIntervalUs},
                                  {"lateIntervalsOver15ms", lateLoopIntervals},
                                  {"highResolutionWaitableTimer", loopPacer.highResolution()}};
-                stats["roomReadyMs"]=roomReadyMs; stats["mediaReadyMs"]=mediaReadyMs; stats["coordinationHealthy"]=signaling.leaseHealthy();stats["coordinationActive"]=coordinationActive;stats["authorizing"]=!authorizing.empty(); if (peer) {stats["network"] = peer->stats();stats["connectionGeneration"]=generation;} if (source) stats["media"] = source->stats(); if (player) stats["player"] = player->stats();
+                stats["roomReadyMs"]=roomReadyMs; stats["mediaReadyMs"]=mediaReadyMs; stats["coordinationHealthy"]=signaling.leaseHealthy();stats["coordinationActive"]=coordinationActive;stats["authorizing"]=!authorizing.empty();
+                if (host) {
+                    stats["viewerCount"] = hostPeers.size();
+                    Json viewerStats = Json::object();
+                    unsigned connectedCount = 0;
+                    for (const auto& [viewer, slot] : hostPeers) {
+                        viewerStats[viewer] = {{"generation", slot.generation}, {"network", slot.peer->stats()}};
+                        if (slot.peer->connected()) ++connectedCount;
+                    }
+                    stats["connectedViewerCount"] = connectedCount;
+                    stats["viewers"] = std::move(viewerStats);
+                    if (!hostPeers.empty()) {
+                        stats["network"] = hostPeers.begin()->second.peer->stats();
+                        stats["connectionGeneration"] = hostPeers.begin()->second.generation;
+                    }
+                } else if (peer) {
+                    stats["network"] = peer->stats(); stats["connectionGeneration"] = generation;
+                }
+                if (source) stats["media"] = source->stats(); if (player) stats["player"] = player->stats();
                 std::cout << stats.dump() << '\n'; lastStats = nowUs();
             }
             loopPacer.wait();
         }
         if (source) source->pause();
-        if (peer) peer->close();
+        clearPeers();
         source.reset(); signaling.stop();
         return 0;
     } catch (const std::exception& e) { std::cerr << "Party: " << e.what() << '\n'; return 1; }

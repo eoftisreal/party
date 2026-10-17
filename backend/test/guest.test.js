@@ -42,7 +42,8 @@ test('room APIs still refuse absent/malformed credentials and guest bootstrap va
 });
 
 test('20-minute outage keeps room, invitation, and viewer membership through cleanup and recovery',async()=>{
-  const f=fixture(),r=await f.rooms.create('host'),v=await f.rooms.join(r.roomId,'viewer',r.inviteCode);
+  // Verify the legacy one-viewer grace-window behavior using an explicit one-viewer cap.
+  const f=fixture({maxViewers:1}),r=await f.rooms.create('host'),v=await f.rooms.join(r.roomId,'viewer',r.inviteCode);
   f.advance(20*60000);await f.rooms.cleanup();
   assert.equal(f.rs.get(r.roomId).status,'open');assert.equal(f.ms.size,2);
   const state=await f.rooms.read(r.roomId,'host');

@@ -1,8 +1,8 @@
 # Party — C++20 live watch-party prototype
 
-A host streams a local movie to one remote viewer using **H.264/Opus over encrypted WebRTC RTP**. The viewer needs no copy of the movie. Appwrite coordinates temporary guest rooms, host authorization, signaling and membership; it does not carry media.
+A host streams a local movie to up to five viewers (configurable) using **H.264/Opus over encrypted WebRTC RTP**. The viewer needs no copy of the movie. Appwrite coordinates temporary guest rooms, host authorization, signaling and membership; it does not carry media.
 
-The standalone `party` application supports host play/pause/seek/stop, optional local preview, viewer playback, ICE connection replacement, bounded jitter buffering, NACK/PLI recovery, network statistics and configurable UDP STUN/TURN. The transport is pinned libdatachannel; media decoding/encoding is FFmpeg; prototype output is SDL2. Viewer media remains in memory.
+The standalone `party` application supports host play/pause/seek/stop, optional local preview, per-viewer peer connections, ICE connection replacement, bounded jitter buffering, NACK/PLI recovery, network statistics and configurable UDP STUN/TURN. The transport is pinned libdatachannel; media decoding/encoding is FFmpeg; prototype output is SDL2. Viewer media remains in memory.
 
 **Status:** real 1080p local peer streaming has been tested, including controls, reconnection and separate host/viewer processes against a local TLS signaling fixture. Appwrite's live deployment, Realtime, cross-Internet NAT/TURN, physical Windows output and GPU encoding still require external verification. The congestion controller is a prototype, not production libwebrtc/GCC. See the measured results and limitations before integration.
 
@@ -69,6 +69,6 @@ Deploy Appwrite and set `PARTY_FUNCTION_URL`; account-free guest sessions are th
 ./build/party viewer --room ROOM_ID --invite INVITE_CODE
 ```
 
-Windows equivalents and DLL/dependency setup are in the Windows guide. Host commands: `play`, `pause`, `seek 120`, `stop`, `stats`, `quit`. `--software` selects libx264; `--headless` is useful for testing with a configured dummy audio device. Default scope is one host + one viewer, SDR up to 1080p, stereo audio. No download endpoints or original-file transfers are implemented.
+Windows equivalents and DLL/dependency setup are in the Windows guide. Host commands: `play`, `pause`, `seek 120`, `stop`, `stats`, `quit`. `--software` selects libx264; `--headless` is useful for testing with a configured dummy audio device. Default room capacity is one host + five viewers (configure `PARTY_MAX_VIEWERS` between 1 and 16 on Appwrite), SDR up to 1080p, stereo audio. Every viewer has a separate encrypted WebRTC connection and consumes its own share of the host's upload bandwidth. Multi-viewer WAN operation still needs physical testing. No download endpoints or original-file transfers are implemented.
 
 Devices on different networks now get public STUN address discovery automatically, with no TURN account or relay configured by default. The movie travels directly between players when their networks permit it. See [cross-network connections and optional relay fallback](docs/TURN.md) for setup, diagnostics, and limitations.

@@ -177,15 +177,24 @@ void Signaling::run(std::stop_token stop) {
         iceRefreshAt = nowUs() + (ttl - 60) * 1000000;
     };
     auto snapshot=[&](Json room) {
-        refreshIce();
-        const auto connection=room.value("connection",Json());
-        std::string generation,sender; bool closed=true;
-        if(connection.is_object()) {
-            generation=connection.at("generation"); sender=host_?connection.at("viewerId").get<std::string>():hostId();
-            closed=connection.at("state")=="closed";
+        std::vector<std::tuple<std::string,std::string,bool>> connections;
+        if (host_) {
+            if (auto it = room.find("connections"); it != room.end() && it->is_array()) {
+                for (const auto& c : *it) {
+                    if (!c.is_object()) continue;
+                    const auto sender = c.value("viewerId", "");
+                    const auto generation = c.value("generation", "");
+                    if (!sender.empty() && !generation.empty())
+                        connections.emplace_back(sender, generation, c.value("state", "") == "closed");
+                }
+            }
+        } else {
+            const auto connection = room.value("connection", Json());
+            if (connection.is_object())
+                connections.emplace_back(hostId(), connection.value("generation", ""), connection.value("state", "") == "closed");
         }
-        {std::lock_guard lock(mutex_); delivery_.authorize(generation,sender,closed);}
-        room["event"]="room"; event(room);
+        {std::lock_guard lock(mutex_); delivery_.authorizeConnections(connections);}
+        room["event"] = "room"; event(std::move(room));
     };
     auto renewSession=[&] {
         const auto joinedAt=nowUs();auto room=request("POST","/join",*renewal);
@@ -199,6 +208,7 @@ void Signaling::run(std::stop_token stop) {
     while(!stop.stop_requested() && !eventOverflow) {
         try {
             if(renewal){renewSession();continue;}
+            refreshIce(); // Obtain ICE settings before negotiating new peers.
             const auto now=nowUs();
             // Realtime is optional. Its connection errors must never block the authoritative HTTP path.
             if(api_ && (!realtime_ || realtime_->isClosed()) && now-lastRealtime>10000000) {
