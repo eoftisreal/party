@@ -56,3 +56,8 @@ Deploy using [Appwrite instructions](../APPWRITE.md): add the private `limits` c
 - **Separate networks:** LAN and WAN/NAT/STUN/authorized UDP TURN, including forced relay and external packet loss/reordering. Same-machine ICE success does not establish Internet reliability.
 
 Scope remains one host and one viewer, up to 1080p SDR, H.264/Opus, libdatachannel and FFmpeg. Congestion control remains a conservative prototype, UDP TURN only, and runtime encoder failure is reported rather than transparently switching encoders. No paid infrastructure or main-player repository changes were introduced. Appwrite carries coordination only; media stays in the encrypted live peer stream and viewer memory.
+
+
+## New five-viewer prototype verification (pending external acceptance)
+
+A later multi-viewer change adds configurable room capacity and one host WebRTC connection per viewer. The earlier single-viewer measurements above remain historical; they must not be interpreted as five-viewer validation. Run simultaneous WAN tests with five different devices and independently verify the selected ICE candidate pairs, viewer leave/rejoin isolation, host upload throughput, audio sync and TURN costs before calling this production-ready.
