@@ -37,7 +37,7 @@ test('five viewers independently join, negotiate, and retain private per-viewer 
   // A single viewer leaving invalidates only its own peer.
   await f.rooms.leave(host.roomId,viewers[1].id,viewers[1].session);
   const after=await f.rooms.read(host.roomId,'host',host.sessionId);
-  assert.equal(after.connections.find(c=>c.viewerId===viewers[1].id)?.state,'closed');
+  assert.equal(after.connections.some(c=>c.viewerId===viewers[1].id),false);
   assert.equal(after.connections.filter(c=>c.state!=='closed').length,4);
   const unaffected=viewers[2];
   await f.signaling.send(host.roomId,unaffected.id,unaffected.session,{
