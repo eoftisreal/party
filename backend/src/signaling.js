@@ -104,7 +104,10 @@ export function makeSignalingService(store, rooms) {
         if (count >= 180) fail(429, 'RATE_LIMIT', 'Too many signaling messages');
         const queued = await s.listSignals(id);
         for (const m of queued) if (Date.parse(m.expiresAt) <= rooms.now()) await s.deleteSignal(m.$id);
-        if (queued.filter(m => Date.parse(m.expiresAt) > rooms.now()).length >= 64) fail(429, 'INBOX_FULL', 'Peer inbox is full');
+        const outstanding = queued.filter(m => Date.parse(m.expiresAt) > rooms.now());
+        // A busy viewer cannot starve signaling for everyone else in the room.
+        if (outstanding.filter(m => m.to === input.to).length >= 48 || outstanding.length >= 256)
+          fail(429, 'INBOX_FULL', 'Peer inbox is full');
         await s.updateMember(memberId(id, user), { rateWindow: window, rateCount: count + 1 });
         const expiresAt = new Date(Math.min(rooms.now() + 120000, Date.parse(room.expiresAt))).toISOString();
         await s.createSignal(sid, { roomId: id, from: user, to: input.to, generation: p.generation, type: input.type, payload,
@@ -129,7 +132,9 @@ export function makeSignalingService(store, rooms) {
         }
         // Offers must be applied before any trickled candidates regardless of database order.
         messages.sort((a, b) => (a.type === 'candidate') - (b.type === 'candidate'));
-        return { messages, serverTimeMs: rooms.now() };
+        // The native delivery ledger validates batches of at most 64 messages.
+        // Remaining messages stay stored until earlier batches are acknowledged.
+        return { messages: messages.slice(0, 64), serverTimeMs: rooms.now() };
       });
     },
     async ack(id, user, session, input) {
