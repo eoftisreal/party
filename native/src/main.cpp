@@ -266,9 +266,13 @@ int runParty(int argc, char** argv) {
                         if (auto it = hostPeers.find(viewer); it != hostPeers.end()) {
                             if (it->second.sessionVersion.empty()) it->second.sessionVersion = version;
                             bool invalid = it->second.sessionVersion != version;
+                            // Only keep a peer whose generation still belongs to this viewer.
+                            // A replaced/expired session may disappear from the snapshot entirely.
+                            bool currentGeneration = false;
                             for (const auto& c : connections) if (c.value("viewerId", "") == viewer &&
-                                c.value("generation", "") == it->second.generation && c.value("state", "") == "closed")
-                                invalid = true;
+                                c.value("generation", "") == it->second.generation &&
+                                c.value("state", "") != "closed") currentGeneration = true;
+                            if (!currentGeneration) invalid = true;
                             if (invalid) {
                                 it->second.peer->close();
                                 hostPeers.erase(it);
