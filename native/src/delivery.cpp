@@ -10,14 +10,24 @@ bool hexId(const Json& value) {
 }
 }
 void SignalDelivery::authorize(std::string generation, std::string sender, bool closed) {
-    generation_ = std::move(generation); sender_ = std::move(sender); closed_ = closed;
-    for (auto& [id, entry] : entries_) if (!current(entry.message) && entry.state != State::Acked) entry.state = State::Applied;
+    authorizeConnections({{std::move(sender), std::move(generation), closed}});
+}
+void SignalDelivery::authorizeConnections(const std::vector<std::tuple<std::string, std::string, bool>>& connections) {
+    connections_.clear();
+    for (const auto& [sender, generation, closed] : connections)
+        if (!sender.empty() && !generation.empty())
+            connections_[sender] = {generation, closed};
+    for (auto& [id, entry] : entries_)
+        if (!current(entry.message) && entry.state != State::Acked)
+            entry.state = State::Applied;
 }
 bool SignalDelivery::current(const Json& message) const {
-    if(!message.is_object() || !message.contains("generation") || !message.at("generation").is_string() ||
-       !message.contains("from") || !message.at("from").is_string() || !message.contains("type") || !message.at("type").is_string()) return false;
-    return message.value("generation", "") == generation_ && !generation_.empty() && message.value("from", "") == sender_ &&
-        (!closed_ || message.value("type", "") == "disconnect");
+    if (!message.is_object() || !message.contains("generation") || !message.at("generation").is_string() ||
+        !message.contains("from") || !message.at("from").is_string() ||
+        !message.contains("type") || !message.at("type").is_string()) return false;
+    const auto it = connections_.find(message.at("from").get<std::string>());
+    return it != connections_.end() && message.at("generation") == it->second.first &&
+        (!it->second.second || message.at("type") == "disconnect");
 }
 void SignalDelivery::ingest(const Json& messages, int64_t time) {
     if (!messages.is_array() || messages.size()>64) throw std::invalid_argument("Invalid signaling inbox");
@@ -66,5 +76,5 @@ void SignalDelivery::acknowledged(const Json& ids,int64_t time) {
         it->second.state=State::Acked; it->second.expiresAt=time+300000000;
     }
 }
-void SignalDelivery::clear() { entries_.clear(); generation_.clear(); sender_.clear(); closed_=true; }
+void SignalDelivery::clear() { entries_.clear(); connections_.clear(); }
 }
