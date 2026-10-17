@@ -1,8 +1,9 @@
 import { randomBytes } from 'node:crypto';
 import { ApiError, digest } from './rooms.js';
+import { iceSettings } from './ice.js';
 // Guest secrets never enter storage; their hash is the private membership identity.
 const guestUser = token => 'g_' + digest(token).slice(0, 32);
-const route = /^\/v1\/rooms\/([a-f0-9]{32})(?:\/(join|leave|close|heartbeat|peers|signals|ack))?$/;
+const route = /^\/v1\/rooms\/([a-f0-9]{32})(?:\/(join|leave|close|heartbeat|peers|signals|ack|ice))?$/;
 function body(req) {
   if (typeof req.bodyText === 'string' && Buffer.byteLength(req.bodyText) > 65536)
     throw new ApiError(413, 'BODY_TOO_LARGE', 'Body too large');
@@ -15,7 +16,7 @@ function body(req) {
   return value;
 }
 function header(req, name) { return Object.entries(req.headers || {}).find(([k]) => k.toLowerCase() === name)?.[1]; }
-export function makeHandler({ service, signaling, authenticate, logError = () => {} }) {
+export function makeHandler({ service, signaling, authenticate, getIceSettings = iceSettings(), logError = () => {} }) {
   return async ({ req, res }) => {
     try {
       const path = (req.path || '/').replace(/\/$/, '') || '/', method = (req.method || '').toUpperCase();
@@ -44,6 +45,10 @@ export function makeHandler({ service, signaling, authenticate, logError = () =>
       if (!user) throw new ApiError(401, 'INVALID_TOKEN', 'Invalid credential');
       if (path === '/v1/rooms' && method === 'POST') return res.json(await service.create(user, body(req)), 201);
       const [, id, action] = route.exec(path) || [], session = header(req, 'x-party-session');
+      if (id && method === 'GET' && action === 'ice') {
+        const settings = await service.inspect(id, user, session, async () => getIceSettings(id, user, session));
+        return res.json(settings, 200, { 'cache-control': 'no-store' });
+      }
       if (id && method === 'GET' && !action) return res.json(await service.read(id, user, session), 200);
       if (id && method === 'GET' && action === 'signals') return res.json(await signaling.inbox(id, user, session), 200);
       if (id && method === 'POST') {

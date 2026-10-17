@@ -77,5 +77,6 @@ private:
     int64_t lastFeedback_ = 0, lastPli_ = 0;
     uint64_t previousReceived_ = 0, previousLost_ = 0;
 };
+rtc::Configuration iceConfigFromServers(const Json& servers);
 rtc::Configuration iceConfigFromEnvironment();
 }

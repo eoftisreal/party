@@ -117,7 +117,7 @@ int runParty(int argc, char** argv) {
         else throw std::invalid_argument("Quality must be balanced, high, or data-saver");
         rtc::InitLogger(rtc::LogLevel::Warning);
         const auto setupStarted = nowUs();
-        const auto ice = iceConfigFromEnvironment();
+        auto ice = env("PARTY_ICE_SERVERS").empty() ? rtc::Configuration{} : iceConfigFromEnvironment();
         auto api = std::make_unique<AppwriteApi>();
         const auto room = roomId.empty() ? api->request("POST", "/v1/rooms", {{"title", "C++ movie night"}})
             : api->request("POST", "/v1/rooms/"+roomId+"/join", {{"inviteCode", invite}});
@@ -189,6 +189,12 @@ int runParty(int argc, char** argv) {
             else if(!coordinationActive && signaling.leaseHealthy())updates.push_back({{"event","coordination-restored"}});
             for (const auto& event : updates) {
                 const auto kind = event.at("event").get<std::string>();
+                if (kind == "ice") {
+                    ice = iceConfigFromServers(event.at("iceServers"));
+                    const bool relay = std::any_of(ice.iceServers.begin(), ice.iceServers.end(), [](const auto& s) { return s.type == rtc::IceServer::Type::Turn; });
+                    std::cout << "ICE servers: " << ice.iceServers.size() << ", TURN relay: " << (relay ? "configured" : "missing") << '\n';
+                    if (!relay) std::cerr << "Cross-network connections may fail: configure TURN on the Party backend.\n";
+                }
                 if (kind == "closed") { std::cerr << "Room unavailable: " << event.value("code", "closed") << '\n'; quitting = true; break; }
                 if(kind=="coordination-lost" || kind=="rejoined") {
                     if(source) {source->pause();}
