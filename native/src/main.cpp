@@ -264,6 +264,7 @@ int runParty(int argc, char** argv) {
                         online.insert(viewer);
                         const auto version = member.value("sessionVersion", "");
                         if (auto it = hostPeers.find(viewer); it != hostPeers.end()) {
+                            if (it->second.sessionVersion.empty()) it->second.sessionVersion = version;
                             bool invalid = it->second.sessionVersion != version;
                             for (const auto& c : connections) if (c.value("viewerId", "") == viewer &&
                                 c.value("generation", "") == it->second.generation && c.value("state", "") == "closed")
