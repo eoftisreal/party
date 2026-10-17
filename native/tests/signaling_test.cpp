@@ -29,6 +29,15 @@ int main(){using namespace party;try{
     auto changed=message('4',"offer",'b');changed["payload"]={{"bad",true}};
     bool rejected=false;try{d.ingest(Json::array({changed}),600001);}catch(const std::invalid_argument&){rejected=true;}
     expect(rejected,"Conflicting duplicate identifier accepted");
+    // Independent viewer generations coexist; replacing one leaves the other active.
+    SignalDelivery multi;
+    multi.authorizeConnections({{"viewer-a",id('a'),false},{"viewer-b",id('b'),false}});
+    auto va=message('7',"answer",'a'), vb=message('8',"answer",'b');
+    va["from"]="viewer-a"; vb["from"]="viewer-b";
+    multi.ingest(Json::array({va,vb}),0);
+    expect(multi.ready(0).size()==2,"Both viewers must receive signals");
+    multi.authorizeConnections({{"viewer-a",id('c'),false},{"viewer-b",id('b'),false}});
+    expect(!multi.current(va) && multi.current(vb),"Replaced viewer invalidated another viewer");
 
     std::atomic<unsigned> polls{0},ackCalls{0};std::atomic<bool> removed{false};
     Json room={{"roomId",id('c')},{"sessionId",id('9')},{"yourUserId","viewer"},{"hostId","host"},
@@ -101,7 +110,8 @@ int main(){using namespace party;try{
     const bool staleDuringRequest=!blocked.leaseHealthy();release=true;
     until(blocked,[](const Json& e){return e.at("event")=="coordination-restored";});blocked.stop();
     expect(staleDuringRequest,"Blocked HTTPS worker extended the media authorization lease");
-    Json hostRoom=room;hostRoom["yourUserId"]="host";std::string requestId;unsigned authorizations=0;
+    Json hostRoom=room;hostRoom["yourUserId"]="host";
+    hostRoom["connections"]=Json::array({room.at("connection")});std::string requestId;unsigned authorizations=0;
     Signaling retry([&](const std::string&,const std::string& path,const Json& input)->Json{
         if(path.ends_with("/peers")){
             if(requestId.empty())requestId=input.at("requestId");else expect(requestId==input.at("requestId").get<std::string>(),"Authorization retry changed request identifier");
