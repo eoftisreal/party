@@ -97,7 +97,9 @@ export function makeRoomsService(store, { now = () => Date.now(), random = rando
       const renewing=renewal.previousSession!==undefined || renewal.requestId!==undefined;
       if(renewing && (!idPattern.test(renewal.previousSession||'') || !idPattern.test(renewal.requestId||'')))
         fail(400,'INVALID_RENEWAL','Previous session and request identifier required');
-      await limit(user,'join'); // Failed invite attempts also consume the committed budget.
+      // New guests have no prior identity. Apply the join-attempt budget per room,
+      // including failed invitations, instead of letting each attempt mint a new identity.
+      await limit('join-room:'+id,'join');
       return store.atomic(async s => {
         const r = await lockRoom(s, id); active(r);
         const mid = memberId(id, user), existing = await s.getMember(mid);
