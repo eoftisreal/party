@@ -221,7 +221,9 @@ void Signaling::run(std::stop_token stop) {
                     else {
                         {std::lock_guard lock(mutex_);commands_.pop_front();}
                         commandFailures=0;commandRetryAt=0;
-                        event({{"event","error"},{"code",e.code}});
+                        Json rejected={{"event","error"},{"code",e.code}};
+                        if(command->at("action")=="peers") rejected["viewerId"]=command->at("input").at("viewerId");
+                        event(std::move(rejected));
                     }
                 } catch(const std::exception&) {retryCommand();}
             }

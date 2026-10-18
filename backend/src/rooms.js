@@ -75,7 +75,7 @@ export function makeRoomsService(store, { now = () => Date.now(), random = rando
     return { ...safe(room, members, user), connections: visible, connection: visible.length === 1 ? visible[0] : null };
   }
   async function limit(user, kind, max = kind === 'create' ? createLimitPerHour : 30) {
-    if (max === 0) return; // Development default: unlimited room creation; skips the extra Appwrite transaction.
+    if (max === 0) return; // Explicit development-only opt-out; public deployments keep a positive cap.
     await store.atomic(async s => {
       const id=digest('limit:'+user).slice(0,32);
       const original=await s.getLimit(id);

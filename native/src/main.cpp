@@ -213,7 +213,7 @@ int runParty(int argc, char** argv) {
         std::signal(SIGINT, interrupt); std::signal(SIGTERM, interrupt);
         std::cout << (host ? "Commands: play, pause, seek SECONDS, stop, stats, quit\n" : "Commands: stats, quit\n");
         int64_t peerStarted = 0, lastState = 0, lastPing = 0, lastStats = 0;
-        bool wasConnected = false, wantsPlay = true, coordinationActive = true, restartRequired = false;
+        bool wasConnected = false, wantsPlay = true, coordinationActive = true;
         bool streamingActive = false, negotiating = false;
         uint64_t sentEpoch = UINT64_MAX;
         LoopPacer loopPacer;
@@ -252,13 +252,13 @@ int runParty(int argc, char** argv) {
                     if (player) { player->reset(); if (host) { const auto t = nowUs(); player->clock.sample(t,t,t,t); } }
                     authorizing.clear(); remoteUser.clear(); generation.clear(); wasConnected = false;
                     streamingActive = false; negotiating = false;
-                    restartRequired = true; coordinationActive = kind == "rejoined" && signaling.leaseHealthy();
+                    coordinationActive = kind == "rejoined" && signaling.leaseHealthy();
                 }
                 if (kind == "coordination-restored") coordinationActive = signaling.leaseHealthy();
                 if (kind == "error") {
                     std::cerr << "Signaling rejected: " << event.value("code", "error") << '\n';
-                    // A retryable authorization failure must not block later room updates.
-                    authorizing.clear();
+                    // A failed viewer authorization must not release other viewers' in-flight work.
+                    if (event.contains("viewerId")) authorizing.erase(event.at("viewerId").get<std::string>());
                 }
                 if (kind == "room" && host && coordinationActive) {
                     const auto& members = event.at("participants");
@@ -287,7 +287,9 @@ int runParty(int argc, char** argv) {
                         }
                         if (!hostPeers.contains(viewer) && !authorizing.contains(viewer)) {
                             authorizing.insert(viewer);
-                            signaling.authorize(viewer, restartRequired);
+                            // A missing native Peer always needs fresh SDP/ICE authority, even if
+                            // another viewer already recovered. Never reuse an old connected generation.
+                            signaling.authorize(viewer, true);
                         }
                     }
                     for (auto it = hostPeers.begin(); it != hostPeers.end();) {
@@ -307,6 +309,7 @@ int runParty(int argc, char** argv) {
                     if (!signaling.current({{"generation", event.at("generation")},{"from",viewer},{"type","answer"}}))
                         continue;
                     if (auto it = hostPeers.find(viewer); it != hostPeers.end()) {
+                        if (it->second.generation == event.at("generation")) continue;
                         it->second.peer->close();
                         hostPeers.erase(it);
                     }
@@ -319,7 +322,6 @@ int runParty(int argc, char** argv) {
                     hostPeers.emplace(viewer, std::move(slot));
                     syncSenderPeers();
                     hostPeers.at(viewer).peer->offer();
-                    restartRequired = false;
                 }
                 if (kind == "signal") {
                     const auto id = event.at("messageId").get<std::string>();
