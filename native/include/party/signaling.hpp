@@ -13,15 +13,13 @@ public:
     long status;
     std::string code;
 };
-class AppwriteApi {
+class PartyApi {
 public:
-    AppwriteApi();
+    PartyApi();
     Json request(const std::string& method, const std::string& path, const Json& data = Json::object());
-    std::string jwt();
     std::string sessionId, roomId;
 private:
-    std::string functionUrl_, endpoint_, project_, jwt_, sessionSecret_, guestToken_;
-    int64_t jwtExpiryUs_ = 0;
+    std::string functionUrl_, partyToken_;
 };
 // All HTTP work happens on one worker. The render/network-pacer thread never blocks on Functions.
 struct SignalingOptions { int64_t pollUs=2000000, heartbeatUs=10000000, leaseUs=120000000, recoveryUs=1800000000; };
@@ -29,7 +27,7 @@ class Signaling {
 public:
     using Request = std::function<Json(const std::string&,const std::string&,const Json&)>;
     Signaling(Request request, Json room, bool host, SignalingOptions options = {});
-    Signaling(std::unique_ptr<AppwriteApi> api, Json room, bool host);
+    Signaling(std::unique_ptr<PartyApi> api, Json room, bool host);
     ~Signaling();
     void start();
     void connecting(bool active);
@@ -45,7 +43,6 @@ public:
     std::string hostId() const { return room_.at("hostId"); }
 private:
     void run(std::stop_token);
-    void notifyRealtime();
     std::unique_ptr<AppwriteApi> api_;
     Request request_;
     SignalingOptions options_;
@@ -54,8 +51,6 @@ private:
     Json room_;
     bool host_;
     std::jthread worker_;
-    std::shared_ptr<rtc::WebSocket> realtime_;
-    std::shared_ptr<std::atomic<bool>> wake_ = std::make_shared<std::atomic<bool>>(true);
     std::mutex mutex_;
     std::deque<Json> commands_, events_;
 };
