@@ -14,6 +14,7 @@ async function request(token,method,path,body,session){
   const route=path.replace(/^\/v1\/rooms\/[a-f0-9]{32}(?=\/|$)/,'/v1/rooms/:room');
   const start=Date.now();
   console.log(`[smoke] START ${method} ${route}`);
+  for(let attempt=0;attempt<3;++attempt) {
   try {
     const response=await fetch(base+path,{method,redirect:'error',signal:AbortSignal.timeout(15000),headers:{...(token?{Authorization:`Bearer ${token}`}:{}),'Content-Type':'application/json',...(session?{'X-Party-Session':session}:{})},...(body?{body:JSON.stringify(body)}:{})});
     const responseBody=await response.json();
@@ -24,7 +25,9 @@ async function request(token,method,path,body,session){
   } catch (error) {
     const kind=error?.name==='TimeoutError'||error?.name==='AbortError'?'TIMEOUT':error?.name==='SyntaxError'?'INVALID_JSON':'REQUEST_FAILED';
     console.error(`[smoke] ${kind} ${method} ${route} after ${Date.now()-start}ms`);
-    throw error;
+    if(attempt===2)throw error;
+    await new Promise(resolve=>setTimeout(resolve,100*(attempt+1)));
+  }
   }
 }
 // Keepalive is serialized with the smoke requests so it cannot race room transactions.
@@ -56,7 +59,7 @@ try{
   assert.equal((await call('invalid','GET',path)).status,401);
   assert.equal((await call('party_'+'f'.repeat(64),'GET',path,undefined,r.sessionId)).status,403);
   assert.equal((await call(viewer,'POST',path+'/join',{inviteCode:'x'.repeat(32)})).status,403);
-  const joined=await call(viewer,'POST',path+'/join',{inviteCode:r.inviteCode});assert.equal(joined.status,200);
+  const joined=await call(viewer,'POST',path+'/join',{inviteCode:r.inviteCode,requestKey:id()+id()});assert.equal(joined.status,200);
   const v=joined.body;viewer=v.partyToken;assert.notEqual(v.yourUserId,r.yourUserId,'Smoke test needs two different identities');
   viewerLease={token:viewer,session:v.sessionId,refreshedAt:Date.now()};
   leases.push(viewerLease);

@@ -58,8 +58,8 @@ values to opt into higher quality.
   Each request resets its options, headers and body; certificate verification
   and the no-redirect policy remain enabled.
 - Room/inbox polling runs every 250 ms during negotiation, returns to 2 seconds
-  on connection, and automatically falls back after 35 seconds. Realtime still
-  wakes the inbox immediately. Integrators should call `connecting(true)` when
+  on connection, and automatically falls back after 35 seconds. The private
+  combined /sync request replaces separate room/inbox polls. Integrators call `connecting(true)` when
   starting/replacing a peer and `connecting(false)` once connected. The burst
   temporarily increases Function/database traffic; it does not bypass auth,
   generation validation, ACKs, retry backoff or leases.
@@ -105,7 +105,7 @@ connection), `player.firstVideoMs` (player creation/reset to first decoded video
 `media.bitrate` (requested), and `media.encoderOpens`. The first-frame metric
 includes waiting for the host; it is not solely decoder processing time.
 
-Faster polling cannot remove Appwrite cold starts, distant TURN relays or NAT
+Faster polling cannot remove Appwrite cold starts or restrictive NAT/firewall
 restrictions. Hardware decoder acceleration, original compressed-media transfer,
 4K/HDR, production congestion control and dynamic resolution remain separate
 work. This change does not claim a measured improvement on a user's WAN or GPU.

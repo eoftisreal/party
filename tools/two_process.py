@@ -21,6 +21,7 @@ import threading
 import time
 parser=argparse.ArgumentParser()
 parser.add_argument('executable');parser.add_argument('movie');parser.add_argument('--report')
+parser.add_argument('--viewers',type=int,default=1,choices=range(1,6),help='Concurrent local viewer processes (1..5)')
 parser.add_argument('--outage',action='store_true',help='Exercise a real 102-second HTTP outage and authorization lease recovery')
 parser.add_argument('--unicode',action='store_true',default=os.name=='nt',help='Exercise a Unicode host-side input filename')
 args=parser.parse_args()
@@ -92,6 +93,10 @@ with tempfile.TemporaryDirectory(prefix='party-processes-') as temporary:
             v=App([str(exe),'viewer','--room',room,'--invite',invite,'--headless'],base,viewerDir);apps.append(v);return v
         viewer=join()
         viewer.wait(lambda:viewer.latest('player','renderedVideoFrames')>25 and viewer.latest('player','decodedAudioPackets')>50)
+        additional=[join() for _ in range(args.viewers-1)]
+        for other in additional:
+            other.wait(lambda other=other:other.latest('player','renderedVideoFrames')>25 and other.latest('player','decodedAudioPackets')>50)
+        report['simultaneousViewers']=args.viewers
         before=viewer.latest('player','renderedVideoFrames');host.command('pause');time.sleep(2.5);viewer.command('stats');time.sleep(.4)
         paused=viewer.latest('player','renderedVideoFrames');time.sleep(1);viewer.command('stats');time.sleep(.4)
         assert viewer.latest('player','renderedVideoFrames')==paused,'Rendering continued while paused'
@@ -112,6 +117,10 @@ with tempfile.TemporaryDirectory(prefix='party-processes-') as temporary:
             before=viewer.latest('player','renderedVideoFrames');host.command('play')
             viewer.wait(lambda:viewer.latest('player','renderedVideoFrames')>before+25)
         first=viewer.stats[-1];viewer.command('quit');viewer.process.wait(timeout=15)
+        for other in additional:
+            rendered=other.latest('player','renderedVideoFrames')
+            other.wait(lambda other=other,rendered=rendered:other.latest('player','renderedVideoFrames')>rendered+15)
+        report['otherViewersSurvivedDeparture']=True
         time.sleep(3);viewer=join()
         viewer.wait(lambda:viewer.latest('player','renderedVideoFrames')>25 and viewer.latest('player','decodedAudioPackets')>50)
         second=viewer.stats[-1]
@@ -121,6 +130,9 @@ with tempfile.TemporaryDirectory(prefix='party-processes-') as temporary:
             assert app.stats[-1]['player']['audioEnergy']>1 and app.stats[-1]['player']['videoChecksum']!=0,'No content-derived playback evidence'
         host.command('stats');time.sleep(.2);report['host']=host.stats[-1]
         host.command('quit');host.process.wait(timeout=15);viewer.process.wait(timeout=15)
+        for other in additional:
+            other.process.wait(timeout=15)
+            assert other.process.returncode==0,'Additional viewer shutdown failed'
         assert viewer.process.returncode==0 and host.process.returncode==0,'Unclean application shutdown'
         assert not list(viewerDir.rglob('*')),'Viewer wrote persistent files'
         report.update(firstViewer=first,secondViewer=second,seekEpochs=epochs,viewerFiles=[],exitCodes=[a.process.returncode for a in apps])
@@ -133,6 +145,7 @@ with tempfile.TemporaryDirectory(prefix='party-processes-') as temporary:
         with urllib.request.urlopen(request,context=ssl.create_default_context(cafile=str(cert))) as response:counts=json.load(response)
         server.terminate();server.wait(timeout=5)
         assert counts.get('signalResponseDropped')==1 and counts.get('ackResponseDropped')==1,'Lost-response scenarios not exercised'
+        assert counts.get('startResponseDropped')==1 and counts.get('joinResponseDropped')==1,'Bootstrap retries not exercised'
         assert counts['accountRequests']==0 and counts['guestRequests']==0,'Removed authentication endpoint was contacted'
         report['fixtureCounters']=counts;report['passed']=True
     except Exception as error:

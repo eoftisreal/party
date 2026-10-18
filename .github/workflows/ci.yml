@@ -41,7 +41,7 @@ jobs:
           node-version: '22'
       - run: npm ci
         working-directory: backend
-      - run: python3 tools/two_process.py build/linux-asan-ubsan/party /tmp/party-test.mp4 --outage --report two-process-linux.json
+      - run: python3 tools/two_process.py build/linux-asan-ubsan/party /tmp/party-test.mp4 --viewers 5 --outage --report two-process-linux.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:

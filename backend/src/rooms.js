@@ -96,12 +96,17 @@ export function makeRoomsService(store, { now = () => Date.now(), random = rando
       await limit(bootstrap.budgetIdentity || user,'create');
       const id = bootstrap.roomId || token(), inviteCode = bootstrap.inviteCode || random(24).toString('base64url'), sessionId = token();
       return store.atomic(async s => {
-        const existing = await s.getRoom(id);
+        let existing = await s.getRoom(id);
         if (existing) {
+          existing = await lockRoom(s, id);
           active(existing);
           if (existing.hostId !== user) fail(403, 'NOT_A_MEMBER', 'Not a room member');
+          if (existing.title !== title.trim()) fail(409, 'REQUEST_REUSE', 'Start request key reused with different input');
           const member = await s.getMember(memberId(id, user));
           if (!member || member.revoked) fail(403, 'CREDENTIAL_REVOKED', 'Membership was revoked');
+          await s.updateMember(memberId(id, user), { lastSeenAt: timestamp() });
+          existing.expiresAt = new Date(now() + reconnectWindowMs).toISOString();
+          await s.updateRoom(id, { expiresAt: existing.expiresAt });
           return { ...safe(existing, await s.listMembers(id), user, member.sessionId), inviteCode };
         }
         const r = await s.createRoom(id, { hostId: user, title: title.trim(), inviteHash: digest(inviteCode), status: 'open', revision: 0,
@@ -117,12 +122,17 @@ export function makeRoomsService(store, { now = () => Date.now(), random = rando
         fail(400,'INVALID_RENEWAL','Previous session and request identifier required');
       // New guests have no prior identity. Apply the join-attempt budget per room,
       // including failed invitations, instead of letting each attempt mint a new identity.
+      // Do not allocate durable per-room counters for attacker-generated nonexistent IDs.
+      active(await get(store, id));
       await limit('join-room:'+id,'join');
       return store.atomic(async s => {
         const r = await lockRoom(s, id); active(r);
         const mid = memberId(id, user), existing = await s.getMember(mid);
         if (existing?.revoked) fail(403, 'CREDENTIAL_REVOKED', 'Membership was revoked');
-        if (existing && renewal.bootstrapRetry) return safe(r, await s.listMembers(id), user, existing.sessionId);
+        if (existing && renewal.bootstrapRetry) {
+          await s.updateMember(mid, { lastSeenAt: timestamp() });
+          return safe(r, await s.listMembers(id), user, existing.sessionId);
+        }
         const renewed=renewing?digest(`renew:${id}:${user}:${renewal.previousSession}:${renewal.requestId}`).slice(0,32):null;
         if(renewing) {
           if(!existing)fail(403,'NOT_A_MEMBER','Membership no longer exists');

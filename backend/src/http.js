@@ -41,13 +41,15 @@ export function makeHandler({ service, signaling, getIceSettings = iceSettings()
       if (path === '/v1/rooms' && method === 'POST') {
         if (caller) throw new ApiError(400, 'CREDENTIAL_NOT_REQUIRED', 'Start a new party without an existing credential');
         const input = body(req), key = retryKey(input);
+        const settings = getIceSettings(); // Reject bad deployment configuration before creating state.
         const token = key ? 'party_' + digest('create-token:' + key) : issueToken();
         const room = await service.create(participant(token), input, { budgetIdentity: 'public-create',
           ...(key ? { roomId: digest('create-room:' + key).slice(0, 32), inviteCode: Buffer.from(digest('create-invite:' + key), 'hex').subarray(0, 24).toString('base64url') } : {}) });
-        return json({ ...room, partyToken: token, ...getIceSettings(room.roomId, room.yourUserId, room.sessionId) }, 201);
+        return json({ ...room, partyToken: token, ...settings }, 201);
       }
       if (id && method === 'POST' && action === 'join') {
         const input = body(req);
+        const settings = getIceSettings();
         const key = retryKey(input);
         const token = caller ? match[1] : key ? 'party_' + digest(`join-token:${id}:${key}`) : issueToken();
         if (!caller && (input.previousSession !== undefined || input.requestId !== undefined))
@@ -56,7 +58,7 @@ export function makeHandler({ service, signaling, getIceSettings = iceSettings()
           if (!input.previousSession) throw new ApiError(400, 'INVALID_RENEWAL', 'Use previous session and request identifier to reconnect');
         } else await service.limit('public-join', 'join', 300);
         const room = await service.join(id, participant(token), input.inviteCode, { ...input, bootstrapRetry: !caller && Boolean(key) });
-        return json({ ...room, partyToken: token, ...getIceSettings(id, room.yourUserId, room.sessionId) }, 200);
+        return json({ ...room, partyToken: token, ...settings }, 200);
       }
       if (!caller) throw new ApiError(401, 'AUTH_REQUIRED', 'Party credential required');
       if (id && method === 'GET' && action === 'ice') {

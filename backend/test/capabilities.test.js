@@ -49,6 +49,7 @@ test('bootstrap response-loss retries are idempotent and revoked credentials can
   const b=(await call('POST','/v1/rooms',{requestKey})).body;
   assert.equal(a.partyToken,b.partyToken);assert.equal(a.roomId,b.roomId);assert.equal(a.inviteCode,b.inviteCode);
   assert.equal(f.rs.size,1);
+  assert.equal((await call('POST','/v1/rooms',{requestKey,title:'Changed'})).body.error.code,'REQUEST_REUSE');
   const path='/v1/rooms/'+a.roomId,join={inviteCode:a.inviteCode,requestKey:key()};
   const v=(await call('POST',path+'/join',join)).body;
   assert.deepEqual((await call('POST',path+'/join',join)).body,v);assert.equal(f.ms.size,2);
@@ -99,4 +100,29 @@ test('legacy auth/bootstrap endpoints, malformed bodies and renewal requests are
   assert.equal((await call('POST','/v1/rooms',{requestKey:'short'})).status,400);
   assert.equal((await call('POST',base+'/join',{previousSession:room.sessionId,requestId:key().slice(0,32)})).status,401);
   assert.equal((await call('POST',base+'/join',{},room.partyToken)).status,400);
+});
+test('delayed bootstrap retry refreshes leases without rotating membership or creating orphan rooms',async()=>{
+  const f=fixture(),call=client(f),requestKey=key();
+  const a=(await call('POST','/v1/rooms',{requestKey})).body;
+  const base='/v1/rooms/'+a.roomId,join={inviteCode:a.inviteCode,requestKey:key()};
+  const v=(await call('POST',base+'/join',join)).body;
+  f.advance(125000);
+  const h=(await call('POST','/v1/rooms',{requestKey})).body;
+  const viewer=(await call('POST',base+'/join',join)).body;
+  assert.equal(h.sessionId,a.sessionId);assert.equal(viewer.sessionId,v.sessionId);
+  assert.equal((await call('GET',base+'/sync',{},h.partyToken,h.sessionId)).status,200);
+  assert.equal((await call('GET',base+'/sync',{},viewer.partyToken,viewer.sessionId)).status,200);
+  assert.equal(f.rs.size,1);assert.equal(f.ms.size,2);
+});
+test('combined sync shares one read-only authorization boundary and unknown rooms do not allocate counters',async()=>{
+  const f=fixture(),{call,base,host}=await start(f);
+  let reads=0,transactions=0;const get=f.store.getRoom,atomic=f.store.atomic;
+  f.store.getRoom=async id=>{++reads;return get(id);};
+  f.store.atomic=work=>{++transactions;return atomic(work);};
+  const sync=await host('GET','/sync');
+  assert.equal(sync.status,200);assert.equal(sync.body.room.status,'open');assert.deepEqual(sync.body.messages,[]);
+  assert.equal(reads,2);assert.equal(transactions,0);
+  const before=f.tables.Limit.size;
+  for(let i=0;i<4;++i)assert.equal((await call('POST','/v1/rooms/'+key().slice(0,32)+'/join',{inviteCode:'x'.repeat(32)})).status,404);
+  assert.equal(f.tables.Limit.size,before+1); // One fixed public-join counter only.
 });
