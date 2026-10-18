@@ -1,3 +1,5 @@
+> Historical record for earlier commits, not verification of the v3 capability protocol. See CAPABILITIES.md and current PR checks.
+
 # Post-merge audit and verification
 
 Audited `main` at `10e898f8946fde57209275f36c182d11b11aab69`, the merge of PR #1, on 2026-10-13. No later main commits were present. PR #3 (`fix/watch-party-audit-completion`) preserves all seven commits from unmerged PR #2 (`fix/reliable-signaling-and-windows`) and completes the follow-up audit. The user subsequently merged PR #3 into main as `4c8d1e90a4aca75c30ebd5cae17ce092473146bc`. The agent did not merge it. The FFmpeg/libdatachannel/Appwrite separation and existing working streaming implementation are preserved.

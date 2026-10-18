@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Actual host/viewer executable test, separate processes, with local TLS fixture coordination.
-This deliberately does not claim Appwrite Cloud, production JWT or WAN verification.
+This deliberately does not claim Appwrite Cloud, production deployment or WAN verification.
 """
 import argparse
 import json
@@ -21,7 +21,7 @@ import threading
 import time
 parser=argparse.ArgumentParser()
 parser.add_argument('executable');parser.add_argument('movie');parser.add_argument('--report')
-parser.add_argument('--guest',action='store_true',help='Use account-free in-memory guest credentials for native clients')
+parser.add_argument('--viewers',type=int,default=1,choices=range(1,6),help='Concurrent local viewer processes (1..5)')
 parser.add_argument('--outage',action='store_true',help='Exercise a real 102-second HTTP outage and authorization lease recovery')
 parser.add_argument('--unicode',action='store_true',default=os.name=='nt',help='Exercise a Unicode host-side input filename')
 args=parser.parse_args()
@@ -85,15 +85,18 @@ with tempfile.TemporaryDirectory(prefix='party-processes-') as temporary:
         startup=server.stdout.readline()
         if not startup:raise RuntimeError('TLS fixture did not start: '+server.stderr.read())
         port=json.loads(startup)['port'];base['PARTY_FUNCTION_URL']=f'https://127.0.0.1:{port}'
-        base.update(PARTY_APPWRITE_ENDPOINT=base['PARTY_FUNCTION_URL'],PARTY_PROJECT_ID='offline-fixture')
         base.pop('PARTY_JWT',None)
         hostDir=work/'host';hostDir.mkdir();viewerDir=work/'viewer';viewerDir.mkdir()
-        host=App([str(exe),'host','--file',str(movie),'--software'],base if args.guest else dict(base,PARTY_SESSION_SECRET=hostToken),hostDir);apps.append(host)
+        host=App([str(exe),'host','--file',str(movie),'--software'],base,hostDir);apps.append(host)
         room=host.line('Room: ');invite=host.line('Invite (share privately): ')
         def join():
-            v=App([str(exe),'viewer','--room',room,'--invite',invite,'--headless'],base if args.guest else dict(base,PARTY_SESSION_SECRET=viewerToken),viewerDir);apps.append(v);return v
+            v=App([str(exe),'viewer','--room',room,'--invite',invite,'--headless'],base,viewerDir);apps.append(v);return v
         viewer=join()
         viewer.wait(lambda:viewer.latest('player','renderedVideoFrames')>25 and viewer.latest('player','decodedAudioPackets')>50)
+        additional=[join() for _ in range(args.viewers-1)]
+        for other in additional:
+            other.wait(lambda other=other:other.latest('player','renderedVideoFrames')>25 and other.latest('player','decodedAudioPackets')>50)
+        report['simultaneousViewers']=args.viewers
         before=viewer.latest('player','renderedVideoFrames');host.command('pause');time.sleep(2.5);viewer.command('stats');time.sleep(.4)
         paused=viewer.latest('player','renderedVideoFrames');time.sleep(1);viewer.command('stats');time.sleep(.4)
         assert viewer.latest('player','renderedVideoFrames')==paused,'Rendering continued while paused'
@@ -114,31 +117,27 @@ with tempfile.TemporaryDirectory(prefix='party-processes-') as temporary:
             before=viewer.latest('player','renderedVideoFrames');host.command('play')
             viewer.wait(lambda:viewer.latest('player','renderedVideoFrames')>before+25)
         first=viewer.stats[-1];viewer.command('quit');viewer.process.wait(timeout=15)
+        for other in additional:
+            rendered=other.latest('player','renderedVideoFrames')
+            other.wait(lambda other=other,rendered=rendered:other.latest('player','renderedVideoFrames')>rendered+15)
+        report['otherViewersSurvivedDeparture']=True
         time.sleep(3);viewer=join()
         viewer.wait(lambda:viewer.latest('player','renderedVideoFrames')>25 and viewer.latest('player','decodedAudioPackets')>50)
         second=viewer.stats[-1]
-        for app in [apps[1],viewer]:
+        for app in [apps[1],*additional,viewer]:
             assert max(s['player']['maxAvDriftUs'] for s in app.stats)<=60000,'A/V scheduling drift exceeded 60ms'
             assert all(s['player']['decodeErrors']==0 for s in app.stats),'Decoder errors'
             assert app.stats[-1]['player']['audioEnergy']>1 and app.stats[-1]['player']['videoChecksum']!=0,'No content-derived playback evidence'
         host.command('stats');time.sleep(.2);report['host']=host.stats[-1]
         host.command('quit');host.process.wait(timeout=15);viewer.process.wait(timeout=15)
+        for other in additional:
+            other.process.wait(timeout=15)
+            assert other.process.returncode==0,'Additional viewer shutdown failed'
         assert viewer.process.returncode==0 and host.process.returncode==0,'Unclean application shutdown'
         assert not list(viewerDir.rglob('*')),'Viewer wrote persistent files'
-        report.update(firstViewer=first,secondViewer=second,seekEpochs=epochs,viewerFiles=[],exitCodes=[a.process.returncode for a in apps])
-        if args.guest:
-            req=urllib.request.Request(f'https://127.0.0.1:{port}/test-metrics',headers={'Authorization':'Bearer '+hostToken})
-            with urllib.request.urlopen(req,context=ssl.create_default_context(cafile=str(cert))) as response:guestCounts=json.load(response)
-            assert guestCounts['jwtRequests']==0,'Guest clients contacted Appwrite account authentication'
-            assert guestCounts['guestRequests']==3,'Guest token was not reused for reconnects'
-            report['nativeAuthentication']='account-free guests; zero account/JWT requests'
-        # Exercise the deployment smoke script against the same offline fixture too.
-        def mint(secret):
-            req=urllib.request.Request(base['PARTY_APPWRITE_ENDPOINT']+'/account/jwts',data=b'{}',method='POST',
-                headers={'Content-Type':'application/json','X-Appwrite-Session':secret})
-            with urllib.request.urlopen(req,context=ssl.create_default_context(cafile=str(cert))) as response:return json.load(response)['jwt']
+        report.update(firstViewer=first,secondViewer=second,additionalViewers=[a.stats[-1] for a in additional],seekEpochs=epochs,viewerFiles=[],exitCodes=[a.process.returncode for a in apps])
         smokeEnv=dict(base,NODE_EXTRA_CA_CERTS=str(cert))
-        if not args.guest:smokeEnv.update(PARTY_HOST_JWT=mint(hostToken),PARTY_VIEWER_JWT=mint(viewerToken))
+        report['nativeAuthentication']='room capabilities; no account or guest-token bootstrap'
         smoke=subprocess.run(['node',str(root/'backend/tools/smoke.js')],env=smokeEnv,capture_output=True,text=True,timeout=45)
         if smoke.returncode:raise RuntimeError('Offline coordination smoke failed: '+smoke.stderr)
         report['coordinationSmoke']='deployment smoke script with synthetic authentication and in-memory DB (not Cloud)'
@@ -146,7 +145,9 @@ with tempfile.TemporaryDirectory(prefix='party-processes-') as temporary:
         with urllib.request.urlopen(request,context=ssl.create_default_context(cafile=str(cert))) as response:counts=json.load(response)
         server.terminate();server.wait(timeout=5)
         assert counts.get('signalResponseDropped')==1 and counts.get('ackResponseDropped')==1,'Lost-response scenarios not exercised'
-        if not args.guest:assert counts['jwtRequests']>=5 and counts['expiredJwts']==2,'JWT 401 renewal not exercised'
+        assert counts.get('startResponseDropped')==1 and counts.get('joinResponseDropped')==1,'Bootstrap retries not exercised'
+        assert counts['accountRequests']==0 and counts['guestRequests']==0,'Removed authentication endpoint was contacted'
+        assert counts['statuses'].get('POST peers 200 ',0)<=32,'Connection recovery entered an authorization restart storm'
         report['fixtureCounters']=counts;report['passed']=True
     except Exception as error:
         report['passed']=False;report['failure']=str(error)

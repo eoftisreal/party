@@ -41,15 +41,13 @@ jobs:
           node-version: '22'
       - run: npm ci
         working-directory: backend
-      - run: python3 tools/two_process.py build/linux-asan-ubsan/party /tmp/party-test.mp4 --outage --report two-process-linux.json
-      - run: python3 tools/two_process.py build/linux-asan-ubsan/party /tmp/party-test.mp4 --guest --outage --report two-process-guests.json
+      - run: python3 tools/two_process.py build/linux-asan-ubsan/party /tmp/party-test.mp4 --viewers 5 --outage --report two-process-linux.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: linux-process-report
           path: |
             two-process-linux.json
-            two-process-guests.json
   windows:
     runs-on: windows-2022
     timeout-minutes: 60

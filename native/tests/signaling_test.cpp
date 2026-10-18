@@ -43,7 +43,7 @@ int main(){using namespace party;try{
     Json room={{"roomId",id('c')},{"sessionId",id('9')},{"yourUserId","viewer"},{"hostId","host"},
         {"connection",{{"generation",id('a')},{"viewerId","viewer"},{"state","offered"}}}};
     Signaling s([&](const std::string&,const std::string& path,const Json&)->Json{
-        if(path.ends_with("/signals")){++polls;return {{"messages",removed?Json::array():Json::array({message('5')})}};}
+        if(path.ends_with("/sync")){++polls;return {{"room",room},{"messages",removed?Json::array():Json::array({message('5')})}};}
         if(path.ends_with("/ack")){removed=true;if(++ackCalls==1)throw std::runtime_error("Lost ACK response");return {{"acknowledged",true}};}
         return room;
     },room,false,{20000,100000,2000000,4000000});
@@ -67,7 +67,7 @@ int main(){using namespace party;try{
     Signaling expired([&](const std::string&,const std::string& path,const Json&)->Json{
         if(path.ends_with("/heartbeat") && ++hearts==1) throw HttpError(403,"PEER_EXPIRED");
         if(path.ends_with("/join"))++joins;
-        if(path.ends_with("/signals"))return {{"messages",Json::array()}};
+        if(path.ends_with("/sync"))return {{"room",room},{"messages",Json::array()}};
         return room;
     },room,false,{20000,20000,2000000,4000000});
     expired.start();until(expired,[](const Json& e){return e.at("event")=="rejoined";});expired.stop();
@@ -82,7 +82,7 @@ int main(){using namespace party;try{
             Json next=room;next["sessionId"]=id('b');return next;
         }
         if(renewalCommitted && joins<2 && path.ends_with("/heartbeat"))throw HttpError(403,"STALE_SESSION");
-        if(path.ends_with("/signals"))return {{"messages",Json::array()}};return room;
+        if(path.ends_with("/sync"))return {{"room",room},{"messages",Json::array()}};return room;
     },room,false,{20000,20000,2000000,6000000});
     lostRenewal.start();until(lostRenewal,[](const Json& e){return e.at("event")=="rejoined";});lostRenewal.stop();
     expect(joins==2,"Lost renewal response broke recovery");
@@ -96,14 +96,14 @@ int main(){using namespace party;try{
     std::atomic<bool> offline{true};
     Signaling outage([&](const std::string&,const std::string& path,const Json&)->Json{
         if(offline && !path.ends_with("/leave"))throw std::runtime_error("offline");
-        if(path.ends_with("/signals"))return {{"messages",Json::array()}};return room;
+        if(path.ends_with("/sync"))return {{"room",room},{"messages",Json::array()}};return room;
     },room,false,{20000,20000,100000,3000000});
     outage.start();until(outage,[](const Json& e){return e.at("event")=="coordination-lost";});offline=false;
     until(outage,[](const Json& e){return e.at("event")=="coordination-restored";});outage.stop();
     std::atomic<bool> entered{false},release{false};unsigned blockedHearts=0;
     Signaling blocked([&](const std::string&,const std::string& path,const Json&)->Json{
         if(path.ends_with("/heartbeat") && ++blockedHearts==1){entered=true;while(!release)std::this_thread::sleep_for(std::chrono::milliseconds(2));}
-        if(path.ends_with("/signals"))return {{"messages",Json::array()}};return room;
+        if(path.ends_with("/sync"))return {{"room",room},{"messages",Json::array()}};return room;
     },room,false,{20000,20000,200000,4000000});
     blocked.start();while(!entered)std::this_thread::sleep_for(std::chrono::milliseconds(2));
     std::this_thread::sleep_for(std::chrono::milliseconds(180));
@@ -118,12 +118,13 @@ int main(){using namespace party;try{
             if(++authorizations==1)throw std::runtime_error("Lost authorization response");
             return {{"generation",id('a')},{"viewerId","viewer"}};
         }
-        if(path.ends_with("/signals"))return {{"messages",Json::array()}};
+        if(path.ends_with("/sync"))return {{"room",hostRoom},{"messages",Json::array()}};
         if(authorizations==2 && !path.ends_with("/heartbeat") && !path.ends_with("/leave"))std::this_thread::sleep_for(std::chrono::milliseconds(100));
         return hostRoom;
     },hostRoom,true,{20000,20000,2000000,4000000});
     retry.authorize("viewer",true);retry.start();until(retry,[&](const Json& e){
         if(e.at("event")!="authorized")return false;
+        expect(e.at("requestId").get<std::string>()==requestId,"Authorization result lost its request correlation");
         expect(retry.current({{"generation",e.at("generation")},{"from",e.at("viewerId")},{"type","answer"}}),"Authorization event preceded authoritative generation refresh");return true;
     });retry.stop();
     expect(authorizations==2,"Authorization retry did not complete");
@@ -141,7 +142,7 @@ int main(){using namespace party;try{
                 }
                 ++sent;return {{"accepted",true}};
             }
-            if(path.ends_with("/signals")) {++incomingPolls;return {{"messages",drained?Json::array():Json::array({message('6')})}};}
+            if(path.ends_with("/sync")) {++incomingPolls;return {{"room",room},{"messages",drained?Json::array():Json::array({message('6')})}};}
             if(path.ends_with("/ack")){++drained;return {{"acknowledged",true}};}
             return room;
         },room,false,{20000,20000,2000000,4000000});
@@ -159,7 +160,7 @@ int main(){using namespace party;try{
     }
     std::atomic<unsigned> setupPolls{0};
     Signaling fast([&](const std::string&,const std::string& path,const Json&)->Json {
-        if(path.ends_with("/signals")) { ++setupPolls; return {{"messages",Json::array()}}; }
+        if(path.ends_with("/sync")) { ++setupPolls; return {{"room",room},{"messages",Json::array()}}; }
         return room;
     },room,false,{2000000,10000000,120000000,300000000});
     fast.start();
@@ -179,7 +180,7 @@ int main(){using namespace party;try{
     Signaling guestOutage([&](const std::string&,const std::string& path,const Json&)->Json {
         if(path.ends_with("/leave")){++leaves;return Json::object();}
         if(temporaryOffline)throw std::runtime_error("weak connection");
-        if(path.ends_with("/signals"))return {{"messages",Json::array()}};
+        if(path.ends_with("/sync"))return {{"room",room},{"messages",Json::array()}};
         return hostRoom;
     },hostRoom,true,{20000,20000,100000,3000000});
     guestOutage.start();until(guestOutage,[](const Json& e){return e.at("event")=="coordination-lost";});

@@ -1,3 +1,5 @@
+> Historical record for earlier commits, not verification of the v3 capability protocol. See CAPABILITIES.md and current PR checks.
+
 # Verification record
 
 The original PR #1 results below are historical. See [the post-merge audit](AUDIT.md) for new regression tests, separate-process measurements, defects discovered during verification, and current CI/external requirements.

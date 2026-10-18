@@ -108,7 +108,12 @@ int runParty(int argc, char** argv) {
             else if (i+1 < argc && arg == "--file") file = argv[++i];
             else if (i+1 < argc && arg == "--room") roomId = argv[++i];
             else if (i+1 < argc && arg == "--invite") invite = argv[++i];
-            else throw std::invalid_argument("Unknown/missing argument: " + arg);
+            else if (i+1 < argc && arg == "--invitation") {
+                const std::string invitation = argv[++i];
+                if (invitation.size() != 65 || invitation[32] != '.') throw std::invalid_argument("Invalid invitation format");
+                roomId = invitation.substr(0, 32); invite = invitation.substr(33);
+            }
+            else throw std::invalid_argument("Unknown or missing argument");
         }
         if (host && file.empty()) throw std::invalid_argument("Host needs --file");
         if (!host && roomId.empty()) throw std::invalid_argument("Viewer needs --room");
@@ -121,13 +126,14 @@ int runParty(int argc, char** argv) {
         rtc::InitLogger(rtc::LogLevel::Warning);
         const auto setupStarted = nowUs();
         auto ice = env("PARTY_ICE_SERVERS").empty() ? rtc::Configuration{} : iceConfigFromEnvironment();
-        auto api = std::make_unique<AppwriteApi>();
+        auto api = std::make_unique<PartyApi>();
         const auto room = roomId.empty() ? api->request("POST", "/v1/rooms", {{"title", "C++ movie night"}})
             : api->request("POST", "/v1/rooms/"+roomId+"/join", {{"inviteCode", invite}});
         const auto roomReadyMs = (nowUs()-setupStarted)/1000;
         if ((room.at("yourRole") == "host") != host) throw std::runtime_error("Room role does not match application mode");
         std::cout << "Room: " << room.at("roomId").get<std::string>() << '\n';
         if (room.contains("inviteCode")) std::cout << "Invite (share privately): " << room.at("inviteCode").get<std::string>() << '\n';
+        if (room.contains("inviteCode")) std::cout << "Invitation (share privately): " << room.at("roomId").get<std::string>() << '.' << room.at("inviteCode").get<std::string>() << '\n';
         Signaling signaling(std::move(api), room, host);
         struct HostSlot {
             std::shared_ptr<Peer> peer;
@@ -144,7 +150,7 @@ int runParty(int argc, char** argv) {
         std::unique_ptr<Player> player;
         std::unique_ptr<MediaSource> source;
         std::string remoteUser, generation;
-        std::set<std::string> authorizing;
+        std::map<std::string, std::string> authorizing;
 
         auto syncSenderPeers = [&] {
             std::lock_guard lock(peerMutex);
@@ -207,9 +213,10 @@ int runParty(int argc, char** argv) {
         std::signal(SIGINT, interrupt); std::signal(SIGTERM, interrupt);
         std::cout << (host ? "Commands: play, pause, seek SECONDS, stop, stats, quit\n" : "Commands: stats, quit\n");
         int64_t peerStarted = 0, lastState = 0, lastPing = 0, lastStats = 0;
-        bool wasConnected = false, wantsPlay = true, coordinationActive = true, restartRequired = false;
+        bool wasConnected = false, wantsPlay = true, coordinationActive = true;
         bool streamingActive = false, negotiating = false;
         uint64_t sentEpoch = UINT64_MAX;
+        uint64_t sessionInvalidations = 0, generationInvalidations = 0, staleAuthorizations = 0;
         LoopPacer loopPacer;
         int64_t lastLoopStart = 0, maxLoopIntervalUs = 0;
         uint64_t loopIntervals = 0, lateLoopIntervals = 0;
@@ -246,17 +253,19 @@ int runParty(int argc, char** argv) {
                     if (player) { player->reset(); if (host) { const auto t = nowUs(); player->clock.sample(t,t,t,t); } }
                     authorizing.clear(); remoteUser.clear(); generation.clear(); wasConnected = false;
                     streamingActive = false; negotiating = false;
-                    restartRequired = true; coordinationActive = kind == "rejoined" && signaling.leaseHealthy();
+                    coordinationActive = kind == "rejoined" && signaling.leaseHealthy();
                 }
                 if (kind == "coordination-restored") coordinationActive = signaling.leaseHealthy();
                 if (kind == "error") {
                     std::cerr << "Signaling rejected: " << event.value("code", "error") << '\n';
-                    // A retryable authorization failure must not block later room updates.
-                    authorizing.clear();
+                    // A failed viewer authorization must not release other viewers' in-flight work.
+                    if (event.contains("viewerId")) {
+                        const auto pending = authorizing.find(event.at("viewerId").get<std::string>());
+                        if (pending != authorizing.end() && pending->second == event.value("requestId", "")) authorizing.erase(pending);
+                    }
                 }
                 if (kind == "room" && host && coordinationActive) {
                     const auto& members = event.at("participants");
-                    const auto connections = event.value("connections", Json::array());
                     std::unordered_set<std::string> online;
                     for (const auto& member : members) {
                         const std::string viewer = member.at("userId");
@@ -266,13 +275,13 @@ int runParty(int argc, char** argv) {
                         if (auto it = hostPeers.find(viewer); it != hostPeers.end()) {
                             if (it->second.sessionVersion.empty()) it->second.sessionVersion = version;
                             bool invalid = it->second.sessionVersion != version;
+                            if (invalid) ++sessionInvalidations;
                             // Only keep a peer whose generation still belongs to this viewer.
                             // A replaced/expired session may disappear from the snapshot entirely.
-                            bool currentGeneration = false;
-                            for (const auto& c : connections) if (c.value("viewerId", "") == viewer &&
-                                c.value("generation", "") == it->second.generation &&
-                                c.value("state", "") != "closed") currentGeneration = true;
-                            if (!currentGeneration) invalid = true;
+                            // Queued room events can lag newer authorization events. Consult the
+                            // latest validated ledger, not an older event's connection array.
+                            const bool currentGeneration = signaling.current({{"generation",it->second.generation},{"from",viewer},{"type","answer"}});
+                            if (!currentGeneration) { invalid = true; ++generationInvalidations; }
                             if (invalid) {
                                 it->second.peer->close();
                                 hostPeers.erase(it);
@@ -280,8 +289,9 @@ int runParty(int argc, char** argv) {
                             }
                         }
                         if (!hostPeers.contains(viewer) && !authorizing.contains(viewer)) {
-                            authorizing.insert(viewer);
-                            signaling.authorize(viewer, restartRequired);
+                            // A missing native Peer always needs fresh SDP/ICE authority, even if
+                            // another viewer already recovered. Never reuse an old connected generation.
+                            authorizing[viewer] = signaling.authorize(viewer, true);
                         }
                     }
                     for (auto it = hostPeers.begin(); it != hostPeers.end();) {
@@ -292,15 +302,18 @@ int runParty(int argc, char** argv) {
                         } else ++it;
                     }
                     for (auto it = authorizing.begin(); it != authorizing.end();)
-                        if (!online.contains(*it)) it = authorizing.erase(it);
+                        if (!online.contains(it->first)) it = authorizing.erase(it);
                         else ++it;
                 }
                 if (kind == "authorized" && host && coordinationActive) {
                     const std::string viewer = event.at("viewerId");
-                    authorizing.erase(viewer);
+                    const auto pending = authorizing.find(viewer);
+                    if (pending == authorizing.end() || pending->second != event.value("requestId", "")) { ++staleAuthorizations; continue; }
+                    authorizing.erase(pending);
                     if (!signaling.current({{"generation", event.at("generation")},{"from",viewer},{"type","answer"}}))
                         continue;
                     if (auto it = hostPeers.find(viewer); it != hostPeers.end()) {
+                        if (it->second.generation == event.at("generation").get<std::string>()) continue;
                         it->second.peer->close();
                         hostPeers.erase(it);
                     }
@@ -313,7 +326,6 @@ int runParty(int argc, char** argv) {
                     hostPeers.emplace(viewer, std::move(slot));
                     syncSenderPeers();
                     hostPeers.at(viewer).peer->offer();
-                    restartRequired = false;
                 }
                 if (kind == "signal") {
                     const auto id = event.at("messageId").get<std::string>();
@@ -363,8 +375,7 @@ int runParty(int argc, char** argv) {
                         if (!authorizing.contains(viewer) &&
                             ((slot.disconnectedSince && nowUs()-slot.disconnectedSince > 3000000) ||
                              nowUs()-slot.started > 35000000)) {
-                            authorizing.insert(viewer);
-                            signaling.authorize(viewer, true);
+                            authorizing[viewer] = signaling.authorize(viewer, true);
                             slot.started = nowUs();
                             slot.disconnectedSince = 0;
                         }
@@ -443,6 +454,9 @@ int runParty(int argc, char** argv) {
                         if (slot.peer->connected()) ++connectedCount;
                     }
                     stats["connectedViewerCount"] = connectedCount;
+                    stats["sessionInvalidations"] = sessionInvalidations;
+                    stats["generationInvalidations"] = generationInvalidations;
+                    stats["staleAuthorizations"] = staleAuthorizations;
                     stats["viewers"] = std::move(viewerStats);
                     if (!hostPeers.empty()) {
                         stats["network"] = hostPeers.begin()->second.peer->stats();

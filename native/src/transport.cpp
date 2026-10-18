@@ -52,6 +52,10 @@ void BoundedPacer::pump(int64_t now) {
 }
 int64_t BoundedPacer::queueUs() const { std::lock_guard lock(mutex_); return int64_t(bytes_) * 8 * 1000000 / rate_.load(); }
 std::shared_ptr<Peer> Peer::create(bool host, const rtc::Configuration& config, FrameCallback frame, std::function<void(Json)> control, unsigned initialBitrate, unsigned maxBitrate) {
+    // Validate before constructing a Peer: init failures before pc_ exists cannot close it.
+    if (config.iceTransportPolicy == rtc::TransportPolicy::Relay ||
+        std::any_of(config.iceServers.begin(), config.iceServers.end(), [](const auto& server) { return server.type == rtc::IceServer::Type::Turn; }))
+        throw std::invalid_argument("Party supports direct STUN-assisted connections only");
     BitrateController validate(initialBitrate, maxBitrate);
     auto p = std::shared_ptr<Peer>(new Peer(host)); p->initialBitrate_ = initialBitrate; p->maxBitrate_ = maxBitrate; p->targetBitrate = initialBitrate; p->init(config, std::move(frame), std::move(control)); return p;
 }
@@ -59,7 +63,6 @@ void Peer::init(const rtc::Configuration& config, FrameCallback frame, std::func
     onControl_ = std::move(control);
     for (const auto& server : config.iceServers) {
         if (server.type == rtc::IceServer::Type::Stun) ++stunServers_;
-        if (server.type == rtc::IceServer::Type::Turn) ++turnServers_;
     }
     pc_ = std::make_shared<rtc::PeerConnection>(config);
     const auto weak = weak_from_this();
@@ -271,21 +274,18 @@ rtc::Configuration iceConfigFromServers(const Json& servers) {
     if(const auto bind=env("PARTY_BIND_ADDRESS");!bind.empty()) cfg.bindAddress=bind;
     {
         if (!servers.is_array() || servers.size() > 8) throw std::invalid_argument("Invalid ICE server configuration");
-        unsigned turns = 0, stuns = 0;
+        unsigned stuns = 0;
         for (const auto& s : servers) {
             rtc::IceServer server(s.at("url").get<std::string>());
             if (server.type == rtc::IceServer::Type::Turn) {
-                if (server.relayType != rtc::IceServer::RelayType::TurnUdp || ++turns > 2) throw std::invalid_argument("Default libjuice build supports up to two UDP TURN servers");
-                server.username = s.at("username").get<std::string>(); server.password = s.at("credential").get<std::string>();
-                if (server.username.empty() || server.password.empty()) throw std::invalid_argument("TURN credentials required");
+                throw std::invalid_argument("Party supports direct STUN-assisted connections only; TURN is disabled");
             }
             if (server.type == rtc::IceServer::Type::Stun && ++stuns > 1) throw std::invalid_argument("Default libjuice build supports one STUN server");
             cfg.iceServers.push_back(server);
         }
     }
     if (env("PARTY_RELAY_ONLY") == "1") {
-        if (std::none_of(cfg.iceServers.begin(), cfg.iceServers.end(), [](const auto& s) { return s.type == rtc::IceServer::Type::Turn; })) throw std::invalid_argument("Relay-only mode needs a TURN server");
-        cfg.iceTransportPolicy = rtc::TransportPolicy::Relay;
+        throw std::invalid_argument("Relay-only mode is not supported");
     }
     return cfg;
 }

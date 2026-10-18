@@ -3,8 +3,15 @@ import assert from 'node:assert/strict';
 import {fixture} from './fixture.js';
 import {ApiError,memberId} from '../src/rooms.js';
 import {makeHandler} from '../src/http.js';
+import {validateSignal} from '../src/signaling.js';
 const rejects=code=>e=>e instanceof ApiError&&e.code===code;
 const sdp=direction=>'v=0\r\na=ice-ufrag:test\r\na=ice-pwd:test-password\r\na=fingerprint:sha-256 '+Array(32).fill('AA').join(':')+'\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\na=rtpmap:96 H264/90000\r\na='+direction+'\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=rtpmap:111 opus/48000/2\r\na='+direction+'\r\n';
+test('direct-only protocol rejects relay trickle and SDP candidates',()=>{
+  const input={messageId:'a'.repeat(32),generation:'b'.repeat(32),to:'viewer',type:'candidate',
+    payload:{candidate:'candidate:1 1 UDP 1 192.0.2.1 5000 typ relay',mid:'video'}};
+  assert.throws(()=>validateSignal(input),rejects('INVALID_ICE'));
+  assert.throws(()=>validateSignal({...input,type:'offer',payload:{sdp:sdp('sendonly')+'a=candidate:1 1 UDP 1 192.0.2.1 5000 typ relay\r\n'}}),rejects('INVALID_SDP'));
+});
 async function connected() {
   const f=fixture(),r=await f.rooms.create('host'),v=await f.rooms.join(r.roomId,'viewer',r.inviteCode);
   const p=await f.signaling.connect(r.roomId,'host',r.sessionId,{viewerId:'viewer'});
@@ -76,9 +83,9 @@ test('signaling rate limit persists across service instances and room close wins
 });
 test('HTTP signaling rejects identity spoofing, missing membership session, and oversized parsed bodies',async()=>{
   const f=await connected(),handler=makeHandler({service:f.rooms,signaling:f.signaling,authenticate:async()=> 'viewer'});
-  async function call(req){let result;await handler({req:{headers:{authorization:'Bearer jwt'},method:'GET',...req},res:{json:(body,status)=>result={body,status}}});return result;}
-  assert.equal((await call({path:`/v1/rooms/${f.r.roomId}/signals`,headers:{authorization:'Bearer jwt','x-appwrite-user-id':'host'}})).status,403);
-  assert.equal((await call({path:`/v1/rooms/${f.r.roomId}/signals`,method:'POST',bodyJson:{sdp:'x'.repeat(70000)}})).status,413);
+  async function call(req){let result;await handler({req:{headers:{authorization:'Bearer party_'+'a'.repeat(64)},method:'GET',...req},res:{json:(body,status)=>result={body,status}}});return result;}
+  assert.equal((await call({path:`/v1/rooms/${f.r.roomId}/signals`,headers:{authorization:'Bearer party_'+'a'.repeat(64),'x-appwrite-user-id':'host'}})).status,403);
+  assert.equal((await call({path:`/v1/rooms/${f.r.roomId}/signals`,method:'POST',headers:{authorization:'Bearer party_'+'a'.repeat(64),'x-party-session':'a'.repeat(32)},bodyJson:{sdp:'x'.repeat(70000)}})).status,413);
 });
 test('post-ACK response loss retries are idempotent and conflicting IDs rejected',async()=>{
   const f=await connected();
@@ -97,7 +104,7 @@ test('restart authorization response loss does not rotate the connection twice',
   assert.equal((await f.rooms.read(f.r.roomId,'host',f.r.sessionId)).connection.generation,first.generation);
 });
 test('development hosting has no per-user creation cap and no create counter writes',async()=>{
-  const f=fixture();
+  const f=fixture({createLimitPerHour:0});
   for(let i=0;i<12;++i)await f.rooms.create('host');
   assert.equal(f.rs.size,12);
   assert.equal(f.tables.Limit.size,0);

@@ -6,7 +6,7 @@ import { appwriteOperation, safeDiagnostic, logDiagnostic } from '../src/diagnos
 
 // SDK requests are real; authentication/storage are offline contract fixtures.
 // The transaction TTL validation matches Appwrite's tagged 2.4.0 source.
-async function execution({ failAt, code = 400, type = 'document_invalid_structure', rollbackFails = false, createLimitPerHour, guest = false } = {}) {
+async function execution({ failAt, code = 400, type = 'document_invalid_structure', rollbackFails = false, createLimitPerHour = 0 } = {}) {
   const original = Client.prototype.call;
   const oldEnv = {...process.env};
   const calls = [], logs = [], persisted = new Map(), transactions = new Map();
@@ -61,7 +61,7 @@ async function execution({ failAt, code = 400, type = 'document_invalid_structur
     documents.set(key,document);return structuredClone(document);
   };
   try {
-    await main({req:{method:'POST',path:'/v1/rooms',headers:{authorization:guest?'Bearer guest_'+'a'.repeat(64):'Bearer test-jwt','x-appwrite-key':secret},bodyJson:{title:'Movie night'}},
+    await main({req:{method:'POST',path:'/v1/rooms',headers:{'x-appwrite-key':secret},bodyJson:{title:'Movie night'}},
       res:{json:(body,status)=>{response={body,status};return response;}},error:line=>logs.push(line)});
     return {response,calls,logs,persisted,transactions,secret};
   } finally {
@@ -78,7 +78,7 @@ test('authenticated room creation uses a valid Appwrite 2.4.0 TTL and commits ro
   assert.ok(starts.every(c=>c.payload.ttl === 60));
   const room = persisted.get('rooms:'+response.body.roomId);
   const members = [...persisted].filter(([key])=>key.startsWith('members:')).map(([,value])=>value);
-  assert.equal(room.hostId,'host');assert.equal(members.length,1);
+  assert.match(room.hostId,/^g_[a-f0-9]{32}$/);assert.equal(members.length,1);
   assert.equal(members[0].roomId,room.$id);assert.equal(members[0].sessionId,response.body.sessionId);
   assert.equal([...persisted.keys()].filter(k=>k.startsWith('limits:')).length,0);
   assert.equal(transactions.size,0);assert.deepEqual(logs,[]);
@@ -126,7 +126,7 @@ test('diagnostics reject unknown types/names and preserve the original error', a
 });
 
 test('guest creation uses real SDK storage without any Appwrite Account request',async()=>{
-  const {response,calls,persisted}=await execution({guest:true});
+  const {response,calls,persisted}=await execution();
   assert.equal(response.status,201);assert.match(response.body.hostId,/^g_[a-f0-9]{32}$/);
   assert.equal(calls.some(c=>c.path==='/v1/account'),false);
   assert.equal(persisted.get('rooms:'+response.body.roomId).hostId,response.body.hostId);

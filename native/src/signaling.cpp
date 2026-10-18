@@ -1,6 +1,5 @@
 #include "party/signaling.hpp"
 #include <curl/curl.h>
-#include <fstream>
 #include <sstream>
 #include <stdexcept>
 namespace party {
@@ -31,7 +30,7 @@ Json http(const std::string& url, const std::string& method, const Json& data, c
     curl_easy_setopt(curl.get(), CURLOPT_TIMEOUT_MS, 10000L);
     curl_easy_setopt(curl.get(), CURLOPT_NOSIGNAL, 1L);
     const auto ca=env("PARTY_CA_BUNDLE"); if(!ca.empty()) curl_easy_setopt(curl.get(),CURLOPT_CAINFO,ca.c_str());
-    // Deliberately no redirects and no TLS-verification override: JWTs stay at configured origin.
+    // No redirects or TLS override: capabilities stay at the configured origin.
     curl_easy_setopt(curl.get(), CURLOPT_WRITEFUNCTION, writeBody);
     curl_easy_setopt(curl.get(), CURLOPT_WRITEDATA, &response);
     if (method != "GET") { curl_easy_setopt(curl.get(), CURLOPT_POSTFIELDS, payload.c_str()); curl_easy_setopt(curl.get(), CURLOPT_POSTFIELDSIZE, long(payload.size())); }
@@ -47,45 +46,40 @@ Json http(const std::string& url, const std::string& method, const Json& data, c
     if (parsed.is_discarded()) throw std::runtime_error("Invalid API JSON");
     return parsed;
 }
-std::string readJwtFile() {
-    const auto path = env("PARTY_JWT_FILE");
-    if (path.empty()) return env("PARTY_JWT");
-    std::ifstream file(path); if (!file) throw std::runtime_error("Cannot read JWT file");
-    std::string jwt; std::getline(file, jwt); return jwt;
+void requireHttps(const std::string& value) {
+    if (!value.starts_with("https://") || value.size() <= 8 || value.find_first_of("@?#\r\n\t ") != std::string::npos)
+        throw std::invalid_argument("Party backend must be an HTTPS origin without credentials, query or fragment");
 }
-void requireHttps(const std::string& value) { if (!value.starts_with("https://")) throw std::invalid_argument("Appwrite endpoints must use HTTPS"); }
 }
-AppwriteApi::AppwriteApi() : functionUrl_(env("PARTY_FUNCTION_URL")), endpoint_(env("PARTY_APPWRITE_ENDPOINT")), project_(env("PARTY_PROJECT_ID")), sessionSecret_(env("PARTY_SESSION_SECRET")) {
-    requireHttps(functionUrl_); while (functionUrl_.ends_with('/')) functionUrl_.pop_back();
-    if(sessionSecret_.size()>8192 || sessionSecret_.find_first_of("\r\n")!=std::string::npos ||
-       project_.size()>36 || project_.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")!=std::string::npos)
-        throw std::invalid_argument("Invalid Appwrite session/project configuration");
-    if (!sessionSecret_.empty()) { requireHttps(endpoint_); if (project_.empty()) throw std::invalid_argument("Appwrite project required for session auth"); }
+PartyApi::PartyApi() : functionUrl_(env("PARTY_FUNCTION_URL")) {
+    if (functionUrl_.empty()) functionUrl_ = "https://party.sgp.appwrite.run";
+    requireHttps(functionUrl_);
+    while (functionUrl_.ends_with('/')) functionUrl_.pop_back();
 }
-std::string AppwriteApi::jwt() {
-    if (!guestToken_.empty()) return guestToken_;
-    if (sessionSecret_.empty()) jwt_ = readJwtFile();
-    else if (nowUs() >= jwtExpiryUs_) {
-        jwt_ = http(endpoint_ + "/account/jwts", "POST", Json::object(), {"X-Appwrite-Project: " + project_, "X-Appwrite-Session: " + sessionSecret_}).at("jwt").get<std::string>();
-        jwtExpiryUs_ = nowUs() + 600000000;
-    }
-    if (jwt_.empty()) {
-        guestToken_ = http(functionUrl_ + "/v1/guest", "POST", Json::object(), {}).at("guestToken").get<std::string>();
-        if (guestToken_.size() != 70 || !guestToken_.starts_with("guest_") ||
-            guestToken_.substr(6).find_first_not_of("0123456789abcdef") != std::string::npos) {
-            guestToken_.clear(); throw std::runtime_error("Invalid guest credential response");
-        }
-        return guestToken_;
-    }
-    if (jwt_.size() > 8192 || jwt_.find_first_of("\r\n") != std::string::npos) throw std::invalid_argument("Valid PARTY_JWT(_FILE) or PARTY_SESSION_SECRET required");
-    return jwt_;
-}
-Json AppwriteApi::request(const std::string& method, const std::string& path, const Json& data) {
-    auto call = [&]{ return http(functionUrl_ + path, method, data, {"Authorization: Bearer " + jwt(), "X-Party-Session: " + sessionId}); };
+Json PartyApi::request(const std::string& method, const std::string& path, const Json& data) {
+    if (!path.starts_with("/v1/rooms") || path.find_first_of("?#\r\n\t ") != std::string::npos)
+        throw std::invalid_argument("Invalid Party API path");
+    std::vector<std::string> headers;
+    if (!partyToken_.empty()) headers.push_back("Authorization: Bearer " + partyToken_);
+    if (!sessionId.empty()) headers.push_back("X-Party-Session: " + sessionId);
+    auto input = data;
+    const bool bootstrap = partyToken_.empty() && method == "POST" && (path == "/v1/rooms" || path.ends_with("/join"));
+    if (bootstrap) input["requestKey"] = randomId() + randomId();
     Json result;
-    try { result = call(); } catch(const HttpError& e) {
-        if(e.status!=401 || sessionSecret_.empty()) throw;
-        jwtExpiryUs_=0; result=call(); // Renew once; a revoked user session still fails closed.
+    // Retry uncertain bootstrap responses with the same private key: no duplicate members.
+    for (unsigned attempt = 0;; ++attempt) {
+        try { result = http(functionUrl_ + path, method, input, headers); break; }
+        catch (const HttpError& e) { if (!bootstrap || attempt == 2 || (e.status < 500 && e.code != "RETRY")) throw; }
+        catch (const std::exception&) { if (!bootstrap || attempt == 2) throw; }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100 * (attempt + 1)));
+    }
+    if (result.contains("partyToken")) {
+        const auto token = result.at("partyToken").get<std::string>();
+        if (token.size() != 70 || !token.starts_with("party_") ||
+            token.substr(6).find_first_not_of("0123456789abcdef") != std::string::npos)
+            throw std::runtime_error("Invalid party credential response");
+        partyToken_ = token;
+        result.erase("partyToken"); // Never expose private capabilities in events/diagnostics.
     }
     if (result.contains("sessionId")) sessionId = result.at("sessionId").get<std::string>();
     if (result.contains("roomId")) roomId = result.at("roomId").get<std::string>();
@@ -93,7 +87,7 @@ Json AppwriteApi::request(const std::string& method, const std::string& path, co
 }
 Signaling::Signaling(Request request, Json room, bool host, SignalingOptions options)
  : request_(std::move(request)), options_(options), room_(std::move(room)), host_(host) {}
-Signaling::Signaling(std::unique_ptr<AppwriteApi> api, Json room, bool host) : api_(std::move(api)), room_(std::move(room)), host_(host) {
+Signaling::Signaling(std::unique_ptr<PartyApi> api, Json room, bool host) : api_(std::move(api)), room_(std::move(room)), host_(host) {
     request_=[this](const auto& method,const auto& path,const auto& data){return api_->request(method,path,data);};
 }
 Signaling::~Signaling() { stop(); }
@@ -105,11 +99,13 @@ void Signaling::send(const std::string& to, const std::string& generation, const
     if (commands_.size() >= 128) throw std::runtime_error("Signaling queue overflow");
     commands_.push_back({{"action", "signals"}, {"input", input}});
 }
-void Signaling::authorize(const std::string& viewer, bool restart) {
+std::string Signaling::authorize(const std::string& viewer, bool restart) {
     if (!host_) throw std::logic_error("Viewer cannot authorize stream");
     std::lock_guard lock(mutex_);
     if(commands_.size()>=128) throw std::runtime_error("Signaling queue overflow");
-    commands_.push_back({{"action", "peers"}, {"input", {{"viewerId", viewer}, {"restart", restart}, {"requestId", randomId()}}}});
+    const auto requestId = randomId();
+    commands_.push_back({{"action", "peers"}, {"input", {{"viewerId", viewer}, {"restart", restart}, {"requestId", requestId}}}});
+    return requestId;
 }
 std::vector<Json> Signaling::events() {
     std::lock_guard lock(mutex_); std::vector<Json> result(events_.begin(), events_.end()); events_.clear();
@@ -117,37 +113,10 @@ std::vector<Json> Signaling::events() {
 }
 void Signaling::processed(const std::string& id,bool success) { std::lock_guard lock(mutex_); delivery_.processed(id,success,nowUs()); }
 bool Signaling::current(const Json& message) { std::lock_guard lock(mutex_); return delivery_.current(message); }
-void Signaling::notifyRealtime() {
-    if(!api_) return;
-    const auto endpoint = env("PARTY_APPWRITE_ENDPOINT"), project = env("PARTY_PROJECT_ID"), database = env("PARTY_DATABASE_ID");
-    if (endpoint.empty() || project.empty() || database.empty()) return;
-    requireHttps(endpoint);
-    auto url = endpoint; url.replace(0, 5, "wss");
-    // Current official SDK uses project-only URL + subscribe/authentication messages.
-    // Session authentication avoids exposing JWTs in URLs. Polling works if older servers reject this protocol.
-    if (env("PARTY_SESSION_SECRET").empty()) return;
-    rtc::WebSocketConfiguration cfg; cfg.maxMessageSize = 65536; cfg.connectionTimeout = std::chrono::seconds(5); cfg.pingInterval = std::chrono::seconds(20);
-    auto ws = std::make_shared<rtc::WebSocket>(cfg); const auto weak = std::weak_ptr<rtc::WebSocket>(ws);
-    const auto wake = wake_;
-    const auto secret = env("PARTY_SESSION_SECRET");
-    const auto channel = "databases." + database + ".collections." + (env("PARTY_NOTIFICATIONS_COLLECTION_ID").empty() ? "notifications" : env("PARTY_NOTIFICATIONS_COLLECTION_ID")) + ".documents";
-    ws->onMessage(nullptr, [weak, wake, secret, channel](std::string text) {
-        try {
-            const auto message = Json::parse(text); const auto type = message.value("type", "");
-            if (auto socket = weak.lock(); socket && type == "connected") {
-                socket->send(Json{{"type", "authentication"}, {"data", {{"session", secret}}}}.dump());
-                socket->send(Json{{"type", "subscribe"}, {"data", Json::array({{{"subscriptionId", "party"}, {"channels", Json::array({channel})}, {"queries", Json::array()}}})}}.dump());
-            }
-            if (type == "event") wake->store(true);
-        } catch (const std::exception&) { /* polling is authoritative */ }
-    });
-    ws->onError([](std::string) { /* no secret-containing URL/error logging */ });
-    ws->open(url + "/realtime?project=" + project); realtime_ = ws;
-}
 void Signaling::run(std::stop_token stop) {
     const auto base="/v1/rooms/"+roomId();
     auto request=[&](const std::string& method,const std::string& path,const Json& data=Json::object()){return request_(method,base+path,data);};
-    int64_t lastPoll=0,lastRoom=0,lastHeartbeat=0,lastRealtime=0,ackRetryAt=0,leaseRefresh=nowUs();
+    int64_t lastPoll=0,lastHeartbeat=nowUs(),ackRetryAt=0,leaseRefresh=nowUs();
     unsigned failures=0, commandFailures=0; bool suspended=false, eventOverflow=false, terminal=false;
     int64_t commandRetryAt=0;
     std::optional<Json> renewal;
@@ -165,6 +134,10 @@ void Signaling::run(std::stop_token stop) {
         events_.push_back(std::move(value));
     };
     int64_t iceRefreshAt = 0;
+    if (room_.contains("iceServers") && env("PARTY_ICE_SERVERS").empty()) {
+        auto settings = room_; settings["event"] = "ice"; event(settings);
+        iceRefreshAt = nowUs() + 3540000000LL;
+    }
     auto refreshIce = [&] {
         // Fetch on the HTTP worker before publishing room authority or offers.
         // Explicit local settings remain available for diagnostics and older backends.
@@ -201,7 +174,7 @@ void Signaling::run(std::stop_token stop) {
         currentSession=room.at("sessionId").get<std::string>();
         {std::lock_guard lock(mutex_);commands_.clear();delivery_.clear();}
         room["event"]="rejoined";event(room);suspended=false;leaseRefresh=joinedAt;
-        leaseDeadlineUs_=joinedAt+options_.leaseUs*5/6;lastRoom=lastPoll=lastHeartbeat=0;
+        leaseDeadlineUs_=joinedAt+options_.leaseUs*5/6;lastPoll=0;lastHeartbeat=joinedAt;
         iceRefreshAt=0;
         renewal.reset();failures=0;commandFailures=0;commandRetryAt=0;
     };
@@ -210,10 +183,6 @@ void Signaling::run(std::stop_token stop) {
             if(renewal){renewSession();continue;}
             refreshIce(); // Obtain ICE settings before negotiating new peers.
             const auto now=nowUs();
-            // Realtime is optional. Its connection errors must never block the authoritative HTTP path.
-            if(api_ && (!realtime_ || realtime_->isClosed()) && now-lastRealtime>10000000) {
-                lastRealtime=now; try{notifyRealtime();}catch(const std::exception&){}
-            }
             if(now-lastHeartbeat>=options_.heartbeatUs) {
                 request("POST","/heartbeat"); lastHeartbeat=now; leaseRefresh=now;
                 leaseDeadlineUs_=now+options_.leaseUs*5/6; // Request start is conservative under response latency.
@@ -243,7 +212,8 @@ void Signaling::run(std::stop_token stop) {
                     auto result=request("POST","/"+command->at("action").get<std::string>(),command->at("input"));
                     if(command->at("action")=="peers") {
                         // Publish only after authority is refreshed; the application can consume events immediately.
-                        snapshot(request("GET",""));lastRoom=now;
+                        snapshot(request("GET",""));
+                        result["requestId"]=command->at("input").at("requestId");
                         result["event"]="authorized";event(result);
                     }
                     std::lock_guard lock(mutex_);commands_.pop_front();
@@ -254,19 +224,19 @@ void Signaling::run(std::stop_token stop) {
                     else {
                         {std::lock_guard lock(mutex_);commands_.pop_front();}
                         commandFailures=0;commandRetryAt=0;
-                        event({{"event","error"},{"code",e.code}});
+                        Json rejected={{"event","error"},{"code",e.code}};
+                        if(command->at("action")=="peers") {
+                            rejected["viewerId"]=command->at("input").at("viewerId");
+                            rejected["requestId"]=command->at("input").at("requestId");
+                        }
+                        event(std::move(rejected));
                     }
                 } catch(const std::exception&) {retryCommand();}
             }
             const auto pollUs = now < fastPollUntilUs_.load() ? std::min<int64_t>(options_.pollUs, 250000) : options_.pollUs;
-            if(now-lastRoom>=pollUs) {snapshot(request("GET",""));lastRoom=now;}
-            const bool notified = wake_->exchange(false);
-            if(now-lastPoll>=pollUs || notified) {
-                const auto inbox=request("GET","/signals");
-                // Refresh authority before accepting a newly observed generation.
-                bool refresh=false;
-                {std::lock_guard lock(mutex_);for(const auto& m:inbox.at("messages")) if(!delivery_.current(m))refresh=true;}
-                if(refresh){snapshot(request("GET",""));lastRoom=now;}
+            if(now-lastPoll>=pollUs) {
+                const auto inbox=request("GET","/sync");
+                snapshot(inbox.at("room"));
                 {std::lock_guard lock(mutex_);delivery_.ingest(inbox.at("messages"),now);}
                 lastPoll=now;
             }
@@ -286,7 +256,6 @@ void Signaling::run(std::stop_token stop) {
         const auto delay=failures?std::min(10000u,250u*(1u<<std::min(failures,5u))):20u;
         for(unsigned slept=0;slept<delay && !stop.stop_requested();slept+=20)std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
-    if(realtime_){realtime_->resetCallbacks();realtime_->close();}
     // Network/auth failures must not implicitly end the host's room.
     // Only an explicit stop (normal player close / End Party) attempts to leave.
     if(stop.stop_requested() && !terminal && !eventOverflow) try{request("POST","/leave");}catch(const std::exception&){}

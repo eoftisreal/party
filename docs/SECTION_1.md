@@ -1,3 +1,5 @@
+> Historical record for earlier commits, not verification of the v3 capability protocol. See CAPABILITIES.md and current PR checks.
+
 # Section 1 — audited and extended
 
 The room API is now v2 and participates in authenticated signaling. See [Appwrite deployment, schema and API](APPWRITE.md) for the current instructions, including transaction support, correct document scopes and session headers. The original Section 1 database schema and clients need migration; use a separate development database first.

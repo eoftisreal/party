@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {Client} from 'node-appwrite';
 import {makeAppwriteStore} from '../src/store.js';
-test('actual Appwrite SDK sends transactionId, private permissions and recipient-only notification permissions',async()=>{
+test('actual Appwrite SDK sends transactionId, private signal and receipt permissions',async()=>{
   const original=Client.prototype.call,calls=[];
   Client.prototype.call=async function(method,url,headers,payload){
     const path=url.pathname;calls.push({method,path,payload});
@@ -23,7 +23,7 @@ test('actual Appwrite SDK sends transactionId, private permissions and recipient
     const signal=calls.find(x=>x.path.includes('/signals/')&&x.method==='post');
     assert.equal(signal.payload.transactionId,'tx');assert.deepEqual(signal.payload.permissions,[]);
     const notification=calls.find(x=>x.path.includes('/notifications/')&&x.method==='post');
-    assert.deepEqual(notification.payload.permissions,['read("user:viewer")']);
+    assert.deepEqual(notification.payload.permissions,[]);
     const guestNotice=calls.find(x=>x.path.includes('/notifications/')&&x.method==='post'&&x.payload.documentId==='guest');
     assert.deepEqual(guestNotice.payload.permissions,[]);
     assert.equal(calls.at(-1).payload.commit,true);
