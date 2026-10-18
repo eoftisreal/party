@@ -46,7 +46,7 @@ export function makeHandler({ service, signaling, getIceSettings = iceSettings()
       }
       if (!caller) throw new ApiError(401, 'AUTH_REQUIRED', 'Party credential required');
       if (id && method === 'GET' && action === 'ice') {
-        const settings = await service.inspect(id, caller, session, async () => getIceSettings(id, user, session));
+        const settings = await service.inspect(id, caller, session, async () => getIceSettings(id, caller, session));
         return res.json(settings, 200, { 'cache-control': 'no-store' });
       }
       if (id && method === 'GET' && !action) return res.json(await service.read(id, caller, session), 200);
