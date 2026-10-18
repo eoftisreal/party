@@ -309,7 +309,7 @@ int runParty(int argc, char** argv) {
                     if (!signaling.current({{"generation", event.at("generation")},{"from",viewer},{"type","answer"}}))
                         continue;
                     if (auto it = hostPeers.find(viewer); it != hostPeers.end()) {
-                        if (it->second.generation == event.at("generation")) continue;
+                        if (it->second.generation == event.at("generation").get<std::string>()) continue;
                         it->second.peer->close();
                         hostPeers.erase(it);
                     }
