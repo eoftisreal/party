@@ -124,6 +124,7 @@ int main(){using namespace party;try{
     },hostRoom,true,{20000,20000,2000000,4000000});
     retry.authorize("viewer",true);retry.start();until(retry,[&](const Json& e){
         if(e.at("event")!="authorized")return false;
+        expect(e.at("requestId").get<std::string>()==requestId,"Authorization result lost its request correlation");
         expect(retry.current({{"generation",e.at("generation")},{"from",e.at("viewerId")},{"type","answer"}}),"Authorization event preceded authoritative generation refresh");return true;
     });retry.stop();
     expect(authorizations==2,"Authorization retry did not complete");

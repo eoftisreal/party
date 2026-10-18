@@ -99,11 +99,13 @@ void Signaling::send(const std::string& to, const std::string& generation, const
     if (commands_.size() >= 128) throw std::runtime_error("Signaling queue overflow");
     commands_.push_back({{"action", "signals"}, {"input", input}});
 }
-void Signaling::authorize(const std::string& viewer, bool restart) {
+std::string Signaling::authorize(const std::string& viewer, bool restart) {
     if (!host_) throw std::logic_error("Viewer cannot authorize stream");
     std::lock_guard lock(mutex_);
     if(commands_.size()>=128) throw std::runtime_error("Signaling queue overflow");
-    commands_.push_back({{"action", "peers"}, {"input", {{"viewerId", viewer}, {"restart", restart}, {"requestId", randomId()}}}});
+    const auto requestId = randomId();
+    commands_.push_back({{"action", "peers"}, {"input", {{"viewerId", viewer}, {"restart", restart}, {"requestId", requestId}}}});
+    return requestId;
 }
 std::vector<Json> Signaling::events() {
     std::lock_guard lock(mutex_); std::vector<Json> result(events_.begin(), events_.end()); events_.clear();
@@ -211,6 +213,7 @@ void Signaling::run(std::stop_token stop) {
                     if(command->at("action")=="peers") {
                         // Publish only after authority is refreshed; the application can consume events immediately.
                         snapshot(request("GET",""));
+                        result["requestId"]=command->at("input").at("requestId");
                         result["event"]="authorized";event(result);
                     }
                     std::lock_guard lock(mutex_);commands_.pop_front();
@@ -222,7 +225,10 @@ void Signaling::run(std::stop_token stop) {
                         {std::lock_guard lock(mutex_);commands_.pop_front();}
                         commandFailures=0;commandRetryAt=0;
                         Json rejected={{"event","error"},{"code",e.code}};
-                        if(command->at("action")=="peers") rejected["viewerId"]=command->at("input").at("viewerId");
+                        if(command->at("action")=="peers") {
+                            rejected["viewerId"]=command->at("input").at("viewerId");
+                            rejected["requestId"]=command->at("input").at("requestId");
+                        }
                         event(std::move(rejected));
                     }
                 } catch(const std::exception&) {retryCommand();}

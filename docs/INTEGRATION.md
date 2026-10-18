@@ -38,4 +38,5 @@ Server-only configuration must never be included in the Windows client. Separate
 - Keep partyToken/session in memory. PartyApi strips the bearer token from public return objects. Poll /sync and consume bundled STUN settings before peer authorization. Keep generation validation/ACK handling.
 - On PEER_EXPIRED use the existing credential plus previousSession/stable requestId. Preserve the 100-second media-authority deadline, 30-minute reconnect window and terminal revoked/stale-session behavior.
 - Keep media quality, color, clocks and per-viewer peer ownership. Add host revoke UI using POST /revoke if desired.
+- `Signaling::authorize` returns its requestId. Track it per viewer and accept only matching authorized/error events; late results from a previous recovery must not clear newer work. Use `Signaling::current` for the latest generation authority, since queued room events can be older than the worker ledger.
 - Rebuild both roles against v3; follow the coordinated deployment sequence in CAPABILITIES.md.

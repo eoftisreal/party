@@ -32,7 +32,7 @@ public:
     void start();
     void connecting(bool active);
     void send(const std::string& to, const std::string& generation, const Json& message);
-    void authorize(const std::string& viewerId, bool restart = false);
+    std::string authorize(const std::string& viewerId, bool restart = false);
     std::vector<Json> events();
     void processed(const std::string& messageId, bool success);
     bool current(const Json& message);
