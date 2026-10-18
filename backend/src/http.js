@@ -34,7 +34,13 @@ export function makeHandler({ service, signaling, getIceSettings = iceSettings()
       const [, id, action] = route.exec(path) || [];
       const auth = header(req, 'authorization');
       const match = typeof auth === 'string' && /^Bearer (party_[a-f0-9]{64})$/.exec(auth);
-      if (auth && !match) throw new ApiError(401, 'INVALID_TOKEN', 'Invalid party credential');
+      // Function-domain ingress can supply its own Authorization header even
+      // when the player sends none. Public Start/Join establish a capability;
+      // transport credentials must not turn those endpoints into account auth.
+      // Private operations still require a valid room token below, and renewal
+      // still requires an existing capability rather than an invitation alone.
+      const publicEntry = method === 'POST' && (path === '/v1/rooms' || action === 'join');
+      if (auth && !match && !publicEntry) throw new ApiError(401, 'INVALID_TOKEN', 'Invalid party credential');
       const caller = match ? participant(match[1]) : null;
       const session = header(req, 'x-party-session');
       // First-time creation and invitation entry have no account/token bootstrap request.

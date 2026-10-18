@@ -54,7 +54,10 @@ test('only viewers absent for the full grace window can be replaced',async()=>{
 
 test('legacy JWT cannot impersonate a guest by registering its public user ID',async()=>{
   const f=fixture(),handler=makeHandler({service:f.rooms,authenticate:async()=> 'g_'+'a'.repeat(32)});
-  let status;
-  await handler({req:{method:'POST',path:'/v1/rooms',headers:{authorization:'Bearer legacy-jwt'},bodyJson:{}},res:{json:(_body,s)=>status=s}});
-  assert.equal(status,401);assert.equal(f.rs.size,0);
+  let status,room;
+  await handler({req:{method:'POST',path:'/v1/rooms',headers:{authorization:'Bearer legacy-jwt'},bodyJson:{}},res:{json:(body,s)=>{status=s;room=body;}}});
+  assert.equal(status,201);assert.equal(f.rs.size,1);
+  assert.notEqual(room.hostId,'g_'+'a'.repeat(32));
+  await handler({req:{method:'GET',path:'/v1/rooms/'+room.roomId+'/sync',headers:{authorization:'Bearer legacy-jwt','x-party-session':room.sessionId}},res:{json:(_body,s)=>status=s}});
+  assert.equal(status,401);
 });

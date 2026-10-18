@@ -93,7 +93,12 @@ test('public budgets cannot be bypassed with fresh credentials and failed invita
 });
 test('legacy auth/bootstrap endpoints, malformed bodies and renewal requests are rejected',async()=>{
   const f=fixture(),{call,room,base}=await start(f);
-  for(const token of ['legacy-jwt','guest_'+key()])assert.equal((await call('POST','/v1/rooms',{},token)).status,401);
+  for(const token of ['legacy-jwt','guest_'+key()]){
+    const anonymous=await call('POST','/v1/rooms',{},token);
+    assert.equal(anonymous.status,201);
+    assert.match(anonymous.body.partyToken,/^party_[a-f0-9]{64}$/);
+    assert.equal((await call('GET','/v1/rooms/'+anonymous.body.roomId+'/sync',{},token,anonymous.body.sessionId)).status,401);
+  }
   assert.equal((await call('POST','/v1/guest')).status,404);
   assert.equal((await call('POST','/v1/rooms',{huge:'x'.repeat(70000)})).status,413);
   assert.equal((await call('POST','/v1/rooms',[])).status,400);
