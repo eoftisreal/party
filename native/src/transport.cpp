@@ -52,6 +52,10 @@ void BoundedPacer::pump(int64_t now) {
 }
 int64_t BoundedPacer::queueUs() const { std::lock_guard lock(mutex_); return int64_t(bytes_) * 8 * 1000000 / rate_.load(); }
 std::shared_ptr<Peer> Peer::create(bool host, const rtc::Configuration& config, FrameCallback frame, std::function<void(Json)> control, unsigned initialBitrate, unsigned maxBitrate) {
+    // Validate before constructing a Peer: init failures before pc_ exists cannot close it.
+    if (config.iceTransportPolicy == rtc::TransportPolicy::Relay ||
+        std::any_of(config.iceServers.begin(), config.iceServers.end(), [](const auto& server) { return server.type == rtc::IceServer::Type::Turn; }))
+        throw std::invalid_argument("Party supports direct STUN-assisted connections only");
     BitrateController validate(initialBitrate, maxBitrate);
     auto p = std::shared_ptr<Peer>(new Peer(host)); p->initialBitrate_ = initialBitrate; p->maxBitrate_ = maxBitrate; p->targetBitrate = initialBitrate; p->init(config, std::move(frame), std::move(control)); return p;
 }
@@ -59,7 +63,6 @@ void Peer::init(const rtc::Configuration& config, FrameCallback frame, std::func
     onControl_ = std::move(control);
     for (const auto& server : config.iceServers) {
         if (server.type == rtc::IceServer::Type::Stun) ++stunServers_;
-        if (server.type == rtc::IceServer::Type::Turn) ++turnServers_;
     }
     pc_ = std::make_shared<rtc::PeerConnection>(config);
     const auto weak = weak_from_this();

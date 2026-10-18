@@ -52,6 +52,7 @@ void requireHttps(const std::string& value) {
 }
 }
 PartyApi::PartyApi() : functionUrl_(env("PARTY_FUNCTION_URL")) {
+    if (functionUrl_.empty()) functionUrl_ = "https://party.sgp.appwrite.run";
     requireHttps(functionUrl_);
     while (functionUrl_.ends_with('/')) functionUrl_.pop_back();
 }

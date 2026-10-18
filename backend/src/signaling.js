@@ -17,6 +17,7 @@ export function validateSignal(input) {
     if (typeof payload.sdp !== 'string' || payload.sdp.length > 60000 || !payload.sdp.startsWith('v=0\r\n') ||
         !/^a=fingerprint:sha-256 (?:[A-Fa-f0-9]{2}:){31}[A-Fa-f0-9]{2}\r?$/m.test(payload.sdp) || !/^a=ice-ufrag:.+\r?$/m.test(payload.sdp) ||
         !/^a=ice-pwd:.+\r?$/m.test(payload.sdp)) fail(400, 'INVALID_SDP', 'WebRTC SDP with ICE and DTLS required');
+    if (/^a=candidate:.*\btyp relay\b/mi.test(payload.sdp)) fail(400, 'INVALID_SDP', 'Relay candidates are not supported');
     const sections = payload.sdp.split(/(?=^m=)/m).slice(1);
     if (sections.some(section => {
       if (/^m=(video|audio) /.test(section)) {
@@ -33,7 +34,7 @@ export function validateSignal(input) {
   } else if (type === 'candidate') {
     exact(payload, ['candidate', 'mid']);
     if (typeof payload.candidate !== 'string' || payload.candidate.length > 2048 || /[\r\n]/.test(payload.candidate) ||
-        !/^(a=)?candidate:[^\s]+ \d+ (udp|tcp) \d+ [^\s]+ \d+ typ (host|srflx|prflx|relay)( .*)?$/i.test(payload.candidate) ||
+        !/^(a=)?candidate:[^\s]+ \d+ (udp|tcp) \d+ [^\s]+ \d+ typ (host|srflx|prflx)( .*)?$/i.test(payload.candidate) ||
         typeof payload.mid !== 'string' || !/^[A-Za-z0-9_-]{1,32}$/.test(payload.mid)) fail(400, 'INVALID_ICE', 'Invalid ICE candidate');
   } else if (type === 'disconnect') {
     exact(payload, []);

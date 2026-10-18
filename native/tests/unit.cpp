@@ -11,6 +11,14 @@ int main() {
         expect(directIce.iceServers.size() == 1 && directIce.iceServers[0].type == rtc::IceServer::Type::Stun,
                "STUN-only discovery must not configure a relay");
         expect(directIce.iceTransportPolicy != rtc::TransportPolicy::Relay, "Direct candidates must remain enabled");
+        for (const bool relayOnly : {false, true}) {
+            rtc::Configuration forbidden;
+            if (relayOnly) forbidden.iceTransportPolicy = rtc::TransportPolicy::Relay;
+            else forbidden.iceServers.emplace_back("turn:relay.example:3478");
+            bool rejected = false;
+            try { Peer::create(false, forbidden, {}, {}); } catch (const std::invalid_argument&) { rejected = true; }
+            expect(rejected, "Custom Peer configuration bypassed direct-only policy");
+        }
         for (const auto& servers : {Json::object(), Json::array({{{"url", "turn:relay.example:3478"}, {"username", ""}, {"credential", ""}}})}) {
             bool rejected = false;
             try { iceConfigFromServers(servers); } catch (const std::exception&) { rejected = true; }

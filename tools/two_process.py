@@ -124,7 +124,7 @@ with tempfile.TemporaryDirectory(prefix='party-processes-') as temporary:
         time.sleep(3);viewer=join()
         viewer.wait(lambda:viewer.latest('player','renderedVideoFrames')>25 and viewer.latest('player','decodedAudioPackets')>50)
         second=viewer.stats[-1]
-        for app in [apps[1],viewer]:
+        for app in [apps[1],*additional,viewer]:
             assert max(s['player']['maxAvDriftUs'] for s in app.stats)<=60000,'A/V scheduling drift exceeded 60ms'
             assert all(s['player']['decodeErrors']==0 for s in app.stats),'Decoder errors'
             assert app.stats[-1]['player']['audioEnergy']>1 and app.stats[-1]['player']['videoChecksum']!=0,'No content-derived playback evidence'
@@ -135,7 +135,7 @@ with tempfile.TemporaryDirectory(prefix='party-processes-') as temporary:
             assert other.process.returncode==0,'Additional viewer shutdown failed'
         assert viewer.process.returncode==0 and host.process.returncode==0,'Unclean application shutdown'
         assert not list(viewerDir.rglob('*')),'Viewer wrote persistent files'
-        report.update(firstViewer=first,secondViewer=second,seekEpochs=epochs,viewerFiles=[],exitCodes=[a.process.returncode for a in apps])
+        report.update(firstViewer=first,secondViewer=second,additionalViewers=[a.stats[-1] for a in additional],seekEpochs=epochs,viewerFiles=[],exitCodes=[a.process.returncode for a in apps])
         smokeEnv=dict(base,NODE_EXTRA_CA_CERTS=str(cert))
         report['nativeAuthentication']='room capabilities; no account or guest-token bootstrap'
         smoke=subprocess.run(['node',str(root/'backend/tools/smoke.js')],env=smokeEnv,capture_output=True,text=True,timeout=45)

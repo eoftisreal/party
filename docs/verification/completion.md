@@ -1,3 +1,5 @@
+> Historical record for earlier commits, not verification of the v3 capability protocol. See ../CAPABILITIES.md and current PR checks.
+
 # Final verification — 2026-10-14
 
 The user merged PR #3 into `main` as `4c8d1e90a4aca75c30ebd5cae17ce092473146bc` while verification was finishing. A fresh fetch confirmed that its complete Git tree (`c1082859ee34ab70191a204cf60148c1a4d42cd1`) exactly matches tested PR head `90c64c5f0e791d24fa324227991113c9bd806244`. This report adds documentation only; no further runtime changes are required to obtain that tested implementation. The agent did not merge any PR.

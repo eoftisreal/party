@@ -1,6 +1,6 @@
 # Account-free, single-endpoint protocol (v3)
 
-The client needs only `PARTY_FUNCTION_URL=https://party.sgp.appwrite.run`.
+The client embeds `https://party.sgp.appwrite.run` as its default. The sole coordination override is `PARTY_FUNCTION_URL` (for staging/tests).
 Appwrite endpoint, project, `party-v2`, collections and scoped runtime key stay on the Function.
 No Accounts API, Appwrite session/JWT, global client API key, guest bootstrap or Realtime subscription exists in this protocol.
 
