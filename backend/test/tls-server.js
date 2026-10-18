@@ -2,35 +2,22 @@
 // while routing, room/signaling authorization and native TLS/WebRTC paths are production code.
 import https from 'node:https';
 import fs from 'node:fs';
-import {randomBytes} from 'node:crypto';
 import {fixture} from './fixture.js';
 import {makeHandler} from '../src/http.js';
 const f=fixture();let wallLast=Date.now(),outageUntil=0;
 function tick(){const now=Date.now();f.advance(now-wallLast);wallLast=now;}
 setInterval(tick,1000).unref();
 let dropSignal=true,dropAck=true;
-const minted={host:0,viewer:0},validJwt=new Map();
-const handler=makeHandler({service:f.rooms,signaling:f.signaling,authenticate:async token=>{
-  if(validJwt.has(token))return validJwt.get(token);
-  throw Object.assign(Error('auth'),{code:401});
-}});
+const handler=makeHandler({service:f.rooms,signaling:f.signaling});
 const statuses={};
 function record(path,method,status,code=''){const action=/^[a-f0-9]{32}$/.test(path.split('/').at(-1))?'room':path.split('/').at(-1);const name=method+' '+action+' '+status+' '+code;statuses[name]=(statuses[name]||0)+1;}
-const counts={signals:0,acks:0,offers:0,answers:0,joins:0,closed:0,signalResponseDropped:0,ackResponseDropped:0,jwtRequests:0,expiredJwts:0,guestRequests:0};
+const counts={signals:0,acks:0,offers:0,answers:0,joins:0,closed:0,signalResponseDropped:0,ackResponseDropped:0,accountRequests:0,guestRequests:0};
 const server=https.createServer({key:fs.readFileSync(process.env.TEST_KEY),cert:fs.readFileSync(process.env.TEST_CERT)},async(req,res)=>{
   tick();const path=new URL(req.url,'https://localhost').pathname;
   if(path==='/test-outage' && req.headers.authorization===`Bearer ${process.env.TEST_HOST_TOKEN}`){
     outageUntil=Date.now()+102000;res.writeHead(200);res.end('{}');return;
   }
-  if(path==='/account/jwts' && req.method==='POST'){
-    const secret=req.headers['x-appwrite-session'];
-    const user=secret===process.env.TEST_HOST_TOKEN?'host':secret===process.env.TEST_VIEWER_TOKEN?'viewer':null;
-    if(!user){res.writeHead(401);res.end('{}');return;}
-    const jwt=randomBytes(24).toString('base64url');++counts.jwtRequests;
-    // Expire the first issued token for each account: native must renew once after a 401.
-    if(++minted[user]>1)validJwt.set(jwt,user);else ++counts.expiredJwts;
-    res.writeHead(201,{'Content-Type':'application/json'});res.end(JSON.stringify({jwt}));return;
-  }
+  if(path.startsWith('/account'))++counts.accountRequests;
   if(path==='/test-metrics' && req.headers.authorization===`Bearer ${process.env.TEST_HOST_TOKEN}`){res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({...counts,statuses,outageRemainingMs:Math.max(0,outageUntil-Date.now()),members:[...f.ms.values()].map(m=>({user:m.userId,ageMs:f.rooms.now()-Date.parse(m.lastSeenAt)}))}));return;}
   if(Date.now()<outageUntil){record(path,req.method,503,'SERVICE_UNAVAILABLE');res.writeHead(503,{'Content-Type':'application/json'});res.end(JSON.stringify({error:{code:'SERVICE_UNAVAILABLE'}}));return;}
   if(path==='/v1/guest' && req.method==='POST')++counts.guestRequests;

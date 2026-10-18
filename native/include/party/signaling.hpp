@@ -43,7 +43,7 @@ public:
     std::string hostId() const { return room_.at("hostId"); }
 private:
     void run(std::stop_token);
-    std::unique_ptr<AppwriteApi> api_;
+    std::unique_ptr<PartyApi> api_;
     Request request_;
     SignalingOptions options_;
     SignalDelivery delivery_;

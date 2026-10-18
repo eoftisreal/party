@@ -4,7 +4,7 @@
 
 | Component | Interface | Integration point |
 | --- | --- | --- |
-| Appwrite | `AppwriteApi`, `Signaling` | Set Function URL for automatic guest credentials (optional legacy session/JWT); consume room/authorized/signal/rejoined/coordination-lost/closed events |
+| Appwrite | `PartyApi`, `Signaling` | Set only Function URL; Start/Join directly issue capabilities; consume room/authorized/signal/rejoined/coordination-lost/closed events |
 | Network | `Peer` | Create send-only host or receive-only viewer; process authenticated generations; feed local/remote SDP and ICE |
 | Host media | `MediaSource` | Optional standalone FFmpeg reader/encoder; replace with your existing decoded-frame encode path |
 | Viewer output | `Player` | Replace SDL rendering/audio with existing render/audio queues while retaining timing/recovery logic |
@@ -27,6 +27,15 @@ The Appwrite room service now admits five viewers by default (`PARTY_MAX_VIEWERS
 
 Create one `Peer` for each viewer in a host-owned map keyed by viewer ID, with a separate ICE/SDP generation for each. The reference `party` app uses this model; it encodes a movie once and sends the same `EncodedFrame` to every connected peer. A viewer leaving, refreshing their session or requiring an ICE restart must not reset the other peers. The host owns play/pause/seek and broadcasts playback state and epoch changes to every connected viewer. Bitrate is conservatively capped at the lowest connected viewer's estimated rate because all viewers share a single encoding, rather than creating a private encoder for each.
 
-**Capacity is not free.** Five viewers at 4 Mbps video each consume roughly 20 Mbps of host upload plus audio, RTP, retransmissions and ICE overhead. Any TURN-relayed viewer also consumes relay bandwidth. The standalone implementation is a small-group fan-out prototype, not an SFU. The main Windows player's integration must provide comparable lifetime management for independently connected peers. Larger groups or substantially different viewer networks may need an SFU and per-viewer simulcast adaptation.
+**Capacity is not free.** Five viewers at 4 Mbps video each consume roughly 20 Mbps of host upload plus audio, RTP, retransmissions and ICE overhead. The standalone implementation is a small-group fan-out prototype, not an SFU. The main Windows player's integration must provide comparable lifetime management for independently connected peers. This architecture remains direct-only; restrictive network pairs may fail.
 
-Server-only `PARTY_MAX_VIEWERS` and `PARTY_TURN_SECRET` must never be included in the Windows client's environment, installer or source. Separate-network, five-viewer simultaneous streams, physical Windows output and TURN relay behavior still require live acceptance tests; passing local backend unit tests does not prove Internet-scale streaming.
+Server-only configuration must never be included in the Windows client. Separate-network, five-viewer streams and physical Windows output require live acceptance; see CAPABILITIES.md. No separate Libcoin player repository was available through the connected account, so only this standalone reference client is updated.
+
+## Required Libcoin changes
+
+- Replace AppwriteApi with PartyApi; remove login/guest bootstrap/JWT refresh, Appwrite SDK and endpoint/project/database client configuration. Keep only the Function URL.
+- Start with one POST /v1/rooms; join with one POST /v1/rooms/:id/join after splitting roomId.inviteCode locally. Generate a private 256-bit requestKey and retain only for uncertain-request retries. Never log it.
+- Keep partyToken/session in memory. PartyApi strips the bearer token from public return objects. Poll /sync and consume bundled STUN settings before peer authorization. Keep generation validation/ACK handling.
+- On PEER_EXPIRED use the existing credential plus previousSession/stable requestId. Preserve the 100-second media-authority deadline, 30-minute reconnect window and terminal revoked/stale-session behavior.
+- Keep media quality, color, clocks and per-viewer peer ownership. Add host revoke UI using POST /revoke if desired.
+- Rebuild both roles against v3; follow the coordinated deployment sequence in CAPABILITIES.md.

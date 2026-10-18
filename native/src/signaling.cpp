@@ -30,7 +30,7 @@ Json http(const std::string& url, const std::string& method, const Json& data, c
     curl_easy_setopt(curl.get(), CURLOPT_TIMEOUT_MS, 10000L);
     curl_easy_setopt(curl.get(), CURLOPT_NOSIGNAL, 1L);
     const auto ca=env("PARTY_CA_BUNDLE"); if(!ca.empty()) curl_easy_setopt(curl.get(),CURLOPT_CAINFO,ca.c_str());
-    // Deliberately no redirects and no TLS-verification override: JWTs stay at configured origin.
+    // No redirects or TLS override: capabilities stay at the configured origin.
     curl_easy_setopt(curl.get(), CURLOPT_WRITEFUNCTION, writeBody);
     curl_easy_setopt(curl.get(), CURLOPT_WRITEDATA, &response);
     if (method != "GET") { curl_easy_setopt(curl.get(), CURLOPT_POSTFIELDS, payload.c_str()); curl_easy_setopt(curl.get(), CURLOPT_POSTFIELDSIZE, long(payload.size())); }
@@ -46,23 +46,39 @@ Json http(const std::string& url, const std::string& method, const Json& data, c
     if (parsed.is_discarded()) throw std::runtime_error("Invalid API JSON");
     return parsed;
 }
-void requireHttps(const std::string& value) { if (!value.starts_with("https://")) throw std::invalid_argument("Party backend must use HTTPS"); }
+void requireHttps(const std::string& value) {
+    if (!value.starts_with("https://") || value.size() <= 8 || value.find_first_of("@?#\r\n\t ") != std::string::npos)
+        throw std::invalid_argument("Party backend must be an HTTPS origin without credentials, query or fragment");
+}
 }
 PartyApi::PartyApi() : functionUrl_(env("PARTY_FUNCTION_URL")) {
     requireHttps(functionUrl_);
     while (functionUrl_.ends_with('/')) functionUrl_.pop_back();
 }
 Json PartyApi::request(const std::string& method, const std::string& path, const Json& data) {
+    if (!path.starts_with("/v1/rooms") || path.find_first_of("?#\r\n\t ") != std::string::npos)
+        throw std::invalid_argument("Invalid Party API path");
     std::vector<std::string> headers;
     if (!partyToken_.empty()) headers.push_back("Authorization: Bearer " + partyToken_);
     if (!sessionId.empty()) headers.push_back("X-Party-Session: " + sessionId);
-    const auto result = http(functionUrl_ + path, method, data, headers);
+    auto input = data;
+    const bool bootstrap = partyToken_.empty() && method == "POST" && (path == "/v1/rooms" || path.ends_with("/join"));
+    if (bootstrap) input["requestKey"] = randomId() + randomId();
+    Json result;
+    // Retry uncertain bootstrap responses with the same private key: no duplicate members.
+    for (unsigned attempt = 0;; ++attempt) {
+        try { result = http(functionUrl_ + path, method, input, headers); break; }
+        catch (const HttpError& e) { if (!bootstrap || attempt == 2 || (e.status < 500 && e.code != "RETRY")) throw; }
+        catch (const std::exception&) { if (!bootstrap || attempt == 2) throw; }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100 * (attempt + 1)));
+    }
     if (result.contains("partyToken")) {
         const auto token = result.at("partyToken").get<std::string>();
         if (token.size() != 70 || !token.starts_with("party_") ||
             token.substr(6).find_first_not_of("0123456789abcdef") != std::string::npos)
             throw std::runtime_error("Invalid party credential response");
         partyToken_ = token;
+        result.erase("partyToken"); // Never expose private capabilities in events/diagnostics.
     }
     if (result.contains("sessionId")) sessionId = result.at("sessionId").get<std::string>();
     if (result.contains("roomId")) roomId = result.at("roomId").get<std::string>();
@@ -97,7 +113,7 @@ bool Signaling::current(const Json& message) { std::lock_guard lock(mutex_); ret
 void Signaling::run(std::stop_token stop) {
     const auto base="/v1/rooms/"+roomId();
     auto request=[&](const std::string& method,const std::string& path,const Json& data=Json::object()){return request_(method,base+path,data);};
-    int64_t lastPoll=0,lastRoom=0,lastHeartbeat=0,ackRetryAt=0,leaseRefresh=nowUs();
+    int64_t lastPoll=0,lastHeartbeat=nowUs(),ackRetryAt=0,leaseRefresh=nowUs();
     unsigned failures=0, commandFailures=0; bool suspended=false, eventOverflow=false, terminal=false;
     int64_t commandRetryAt=0;
     std::optional<Json> renewal;
@@ -115,6 +131,10 @@ void Signaling::run(std::stop_token stop) {
         events_.push_back(std::move(value));
     };
     int64_t iceRefreshAt = 0;
+    if (room_.contains("iceServers") && env("PARTY_ICE_SERVERS").empty()) {
+        auto settings = room_; settings["event"] = "ice"; event(settings);
+        iceRefreshAt = nowUs() + 3540000000LL;
+    }
     auto refreshIce = [&] {
         // Fetch on the HTTP worker before publishing room authority or offers.
         // Explicit local settings remain available for diagnostics and older backends.
@@ -151,7 +171,7 @@ void Signaling::run(std::stop_token stop) {
         currentSession=room.at("sessionId").get<std::string>();
         {std::lock_guard lock(mutex_);commands_.clear();delivery_.clear();}
         room["event"]="rejoined";event(room);suspended=false;leaseRefresh=joinedAt;
-        leaseDeadlineUs_=joinedAt+options_.leaseUs*5/6;lastRoom=lastPoll=lastHeartbeat=0;
+        leaseDeadlineUs_=joinedAt+options_.leaseUs*5/6;lastPoll=0;lastHeartbeat=joinedAt;
         iceRefreshAt=0;
         renewal.reset();failures=0;commandFailures=0;commandRetryAt=0;
     };
@@ -189,7 +209,7 @@ void Signaling::run(std::stop_token stop) {
                     auto result=request("POST","/"+command->at("action").get<std::string>(),command->at("input"));
                     if(command->at("action")=="peers") {
                         // Publish only after authority is refreshed; the application can consume events immediately.
-                        snapshot(request("GET",""));lastRoom=now;
+                        snapshot(request("GET",""));
                         result["event"]="authorized";event(result);
                     }
                     std::lock_guard lock(mutex_);commands_.pop_front();
@@ -205,13 +225,9 @@ void Signaling::run(std::stop_token stop) {
                 } catch(const std::exception&) {retryCommand();}
             }
             const auto pollUs = now < fastPollUntilUs_.load() ? std::min<int64_t>(options_.pollUs, 250000) : options_.pollUs;
-            if(now-lastRoom>=pollUs) {snapshot(request("GET",""));lastRoom=now;}
             if(now-lastPoll>=pollUs) {
-                const auto inbox=request("GET","/signals");
-                // Refresh authority before accepting a newly observed generation.
-                bool refresh=false;
-                {std::lock_guard lock(mutex_);for(const auto& m:inbox.at("messages")) if(!delivery_.current(m))refresh=true;}
-                if(refresh){snapshot(request("GET",""));lastRoom=now;}
+                const auto inbox=request("GET","/sync");
+                snapshot(inbox.at("room"));
                 {std::lock_guard lock(mutex_);delivery_.ingest(inbox.at("messages"),now);}
                 lastPoll=now;
             }

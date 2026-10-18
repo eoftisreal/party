@@ -44,9 +44,11 @@ test('five viewers independently join, negotiate, and retain private per-viewer 
     to:'host',generation:unaffected.generation,messageId:'f'.repeat(32),type:'answer',payload:{sdp:sdp('recvonly')}
   });
   assert.equal((await f.signaling.inbox(host.roomId,'host',host.sessionId)).messages.length,1);
-  const rejoined=await f.rooms.join(host.roomId,viewers[1].id,host.inviteCode);
+  await assert.rejects(f.rooms.join(host.roomId,viewers[1].id,host.inviteCode),e=>e.code==='CREDENTIAL_REVOKED');
+  const replacement='replacement-viewer';
+  const rejoined=await f.rooms.join(host.roomId,replacement,host.inviteCode);
   assert.equal(rejoined.participants.length,6);
-  const restarted=await f.signaling.connect(host.roomId,'host',host.sessionId,{viewerId:viewers[1].id,restart:true});
+  const restarted=await f.signaling.connect(host.roomId,'host',host.sessionId,{viewerId:replacement,restart:true});
   assert.notEqual(restarted.generation,viewers[1].generation);
   const still=await f.rooms.read(host.roomId,unaffected.id,unaffected.session);
   assert.equal(still.connection.generation,unaffected.generation);

@@ -1,16 +1,16 @@
 # Party — C++20 live watch-party prototype
 
-A host streams a local movie to up to five viewers (configurable) using **H.264/Opus over encrypted WebRTC RTP**. The viewer needs no copy of the movie. Appwrite coordinates temporary guest rooms, host authorization, signaling and membership; it does not carry media.
+A host streams a local movie to up to five viewers (configurable) using **H.264/Opus over encrypted WebRTC RTP**. The viewer needs no copy of the movie. Appwrite coordinates account-free capability rooms, host authorization, signaling and membership; it does not carry media.
 
-The standalone `party` application supports host play/pause/seek/stop, optional local preview, per-viewer peer connections, ICE connection replacement, bounded jitter buffering, NACK/PLI recovery, network statistics and configurable UDP STUN/TURN. The transport is pinned libdatachannel; media decoding/encoding is FFmpeg; prototype output is SDL2. Viewer media remains in memory.
+The standalone `party` application supports host play/pause/seek/stop, optional local preview, per-viewer peer connections, ICE connection replacement, bounded jitter buffering, NACK/PLI recovery, network statistics and STUN-assisted direct UDP connections (no TURN). The transport is pinned libdatachannel; media decoding/encoding is FFmpeg; prototype output is SDL2. Viewer media remains in memory.
 
-**Status:** real 1080p local peer streaming has been tested, including controls, reconnection and separate host/viewer processes against a local TLS signaling fixture. Appwrite's live deployment, Realtime, cross-Internet NAT/TURN, physical Windows output and GPU encoding still require external verification. The congestion controller is a prototype, not production libwebrtc/GCC. See the measured results and limitations before integration.
+**Status:** real 1080p local peer streaming has been tested, including controls, reconnection and separate host/viewer processes against a local TLS signaling fixture. The v3 capability protocol is a breaking upgrade; see its migration guide and PR CI for current verification. Live Appwrite, cross-Internet NAT, physical Windows output and GPU encoding require external verification. The congestion controller is a prototype, not production libwebrtc/GCC. See the measured results and limitations before integration.
 
-- [Verified Windows/Linux results and downloadable executable](docs/verification/completion.md)
+- [Historical Windows/Linux results and executable](docs/verification/completion.md)
 - [Windows build and remote test](docs/WINDOWS.md)
 - [Appwrite setup, schema and API](docs/APPWRITE.md)
 - [Architecture and transport evaluation](docs/ARCHITECTURE.md)
-- [Post-merge audit and current verification](docs/AUDIT.md)
+- [Historical post-merge audit](docs/AUDIT.md)
 - [Original tests and measurements](docs/TESTS.md)
 - [Streaming quality profiles, diagnostics and tuning](docs/STREAMING_TUNING.md)
 - [Integration into the existing player](docs/INTEGRATION.md)
@@ -60,15 +60,18 @@ The generated movie is a real encoded test-pattern video with audio. The loopbac
 
 ## Remote use
 
-Deploy Appwrite and set `PARTY_FUNCTION_URL`; account-free guest sessions are the default when no legacy user credentials are configured. Share the displayed room ID and invite code with the viewer. Configure optional ICE servers as documented. See [guest sessions and reconnects](docs/GUEST_SESSIONS.md). The executable does not load `.env` files automatically.
+See [v3 capability security, API and migration](docs/CAPABILITIES.md). No accounts, JWTs, guest bootstrap, client database configuration or Realtime are used.
+
+Deploy the matching backend and set only `PARTY_FUNCTION_URL=https://party.sgp.appwrite.run`. Share the displayed invitation privately. The backend supplies STUN settings. The executable does not load `.env` files automatically.
 
 ```sh
-# Host: creates a private room and prints room ID + invite.
+export PARTY_FUNCTION_URL=https://party.sgp.appwrite.run
+# Host: creates a private room and prints an invitation.
 ./build/party host --file /path/to/movie.mp4 --preview
-# Viewer: different user's credentials, no movie file required.
-./build/party viewer --room ROOM_ID --invite INVITE_CODE
+# Viewer: no account or movie file required.
+./build/party viewer --invitation ROOM_ID.INVITE_CODE
 ```
 
 Windows equivalents and DLL/dependency setup are in the Windows guide. Host commands: `play`, `pause`, `seek 120`, `stop`, `stats`, `quit`. `--software` selects libx264; `--headless` is useful for testing with a configured dummy audio device. Default room capacity is one host + five viewers (configure `PARTY_MAX_VIEWERS` between 1 and 16 on Appwrite), SDR up to 1080p, stereo audio. Every viewer has a separate encrypted WebRTC connection and consumes its own share of the host's upload bandwidth. Multi-viewer WAN operation still needs physical testing. No download endpoints or original-file transfers are implemented.
 
-Devices on different networks now get public STUN address discovery automatically, with no TURN account or relay configured by default. The movie travels directly between players when their networks permit it. See [cross-network connections and optional relay fallback](docs/TURN.md) for setup, diagnostics, and limitations.
+Devices on different networks now get public STUN address discovery automatically, with no TURN account or relay supported. The movie travels directly between players when their networks permit it. See [direct-only connectivity limitations](docs/TURN.md) for setup, diagnostics, and limitations.

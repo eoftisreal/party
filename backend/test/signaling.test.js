@@ -76,9 +76,9 @@ test('signaling rate limit persists across service instances and room close wins
 });
 test('HTTP signaling rejects identity spoofing, missing membership session, and oversized parsed bodies',async()=>{
   const f=await connected(),handler=makeHandler({service:f.rooms,signaling:f.signaling,authenticate:async()=> 'viewer'});
-  async function call(req){let result;await handler({req:{headers:{authorization:'Bearer jwt'},method:'GET',...req},res:{json:(body,status)=>result={body,status}}});return result;}
-  assert.equal((await call({path:`/v1/rooms/${f.r.roomId}/signals`,headers:{authorization:'Bearer jwt','x-appwrite-user-id':'host'}})).status,403);
-  assert.equal((await call({path:`/v1/rooms/${f.r.roomId}/signals`,method:'POST',bodyJson:{sdp:'x'.repeat(70000)}})).status,413);
+  async function call(req){let result;await handler({req:{headers:{authorization:'Bearer party_'+'a'.repeat(64)},method:'GET',...req},res:{json:(body,status)=>result={body,status}}});return result;}
+  assert.equal((await call({path:`/v1/rooms/${f.r.roomId}/signals`,headers:{authorization:'Bearer party_'+'a'.repeat(64),'x-appwrite-user-id':'host'}})).status,403);
+  assert.equal((await call({path:`/v1/rooms/${f.r.roomId}/signals`,method:'POST',headers:{authorization:'Bearer party_'+'a'.repeat(64),'x-party-session':'a'.repeat(32)},bodyJson:{sdp:'x'.repeat(70000)}})).status,413);
 });
 test('post-ACK response loss retries are idempotent and conflicting IDs rejected',async()=>{
   const f=await connected();
@@ -97,7 +97,7 @@ test('restart authorization response loss does not rotate the connection twice',
   assert.equal((await f.rooms.read(f.r.roomId,'host',f.r.sessionId)).connection.generation,first.generation);
 });
 test('development hosting has no per-user creation cap and no create counter writes',async()=>{
-  const f=fixture();
+  const f=fixture({createLimitPerHour:0});
   for(let i=0;i<12;++i)await f.rooms.create('host');
   assert.equal(f.rs.size,12);
   assert.equal(f.tables.Limit.size,0);

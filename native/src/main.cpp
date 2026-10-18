@@ -108,7 +108,12 @@ int runParty(int argc, char** argv) {
             else if (i+1 < argc && arg == "--file") file = argv[++i];
             else if (i+1 < argc && arg == "--room") roomId = argv[++i];
             else if (i+1 < argc && arg == "--invite") invite = argv[++i];
-            else throw std::invalid_argument("Unknown/missing argument: " + arg);
+            else if (i+1 < argc && arg == "--invitation") {
+                const std::string invitation = argv[++i];
+                if (invitation.size() != 65 || invitation[32] != '.') throw std::invalid_argument("Invalid invitation format");
+                roomId = invitation.substr(0, 32); invite = invitation.substr(33);
+            }
+            else throw std::invalid_argument("Unknown or missing argument");
         }
         if (host && file.empty()) throw std::invalid_argument("Host needs --file");
         if (!host && roomId.empty()) throw std::invalid_argument("Viewer needs --room");
@@ -121,13 +126,14 @@ int runParty(int argc, char** argv) {
         rtc::InitLogger(rtc::LogLevel::Warning);
         const auto setupStarted = nowUs();
         auto ice = env("PARTY_ICE_SERVERS").empty() ? rtc::Configuration{} : iceConfigFromEnvironment();
-        auto api = std::make_unique<AppwriteApi>();
+        auto api = std::make_unique<PartyApi>();
         const auto room = roomId.empty() ? api->request("POST", "/v1/rooms", {{"title", "C++ movie night"}})
             : api->request("POST", "/v1/rooms/"+roomId+"/join", {{"inviteCode", invite}});
         const auto roomReadyMs = (nowUs()-setupStarted)/1000;
         if ((room.at("yourRole") == "host") != host) throw std::runtime_error("Room role does not match application mode");
         std::cout << "Room: " << room.at("roomId").get<std::string>() << '\n';
         if (room.contains("inviteCode")) std::cout << "Invite (share privately): " << room.at("inviteCode").get<std::string>() << '\n';
+        if (room.contains("inviteCode")) std::cout << "Invitation (share privately): " << room.at("roomId").get<std::string>() << '.' << room.at("inviteCode").get<std::string>() << '\n';
         Signaling signaling(std::move(api), room, host);
         struct HostSlot {
             std::shared_ptr<Peer> peer;

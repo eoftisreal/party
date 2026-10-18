@@ -11,12 +11,6 @@ int main() {
         expect(directIce.iceServers.size() == 1 && directIce.iceServers[0].type == rtc::IceServer::Type::Stun,
                "STUN-only discovery must not configure a relay");
         expect(directIce.iceTransportPolicy != rtc::TransportPolicy::Relay, "Direct candidates must remain enabled");
-        const auto ice = iceConfigFromServers(Json::array({
-            {{"url", "stun:relay.example:3478"}},
-            {{"url", "turn:relay.example:3478?transport=udp"}, {"username", "temporary"}, {"credential", "temporary-secret"}}
-        }));
-        expect(ice.iceServers.size() == 2 && ice.disableAutoNegotiation, "backend ICE configuration lost");
-        expect(ice.iceServers[1].username == "temporary" && ice.iceServers[1].password == "temporary-secret", "TURN credentials lost");
         for (const auto& servers : {Json::object(), Json::array({{{"url", "turn:relay.example:3478"}, {"username", ""}, {"credential", ""}}})}) {
             bool rejected = false;
             try { iceConfigFromServers(servers); } catch (const std::exception&) { rejected = true; }

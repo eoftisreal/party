@@ -41,17 +41,31 @@ export function validateSignal(input) {
   return input;
 }
 export function makeSignalingService(store, rooms) {
+  async function messages(s, room, user, session) {
+    const result = [], peers = new Map();
+    for (const m of await s.listSignals(room.$id)) {
+      if (m.to !== user || m.toSession !== session || Date.parse(m.expiresAt) <= rooms.now()) continue;
+      const id = peerId(room.$id, user === room.hostId ? m.from : user);
+      if (!peers.has(id)) peers.set(id, await s.getPeer(id));
+      const p = peers.get(id);
+      if (!p || p.generation !== m.generation || (p.state === 'closed' && m.type !== 'disconnect')) continue;
+      result.push({ messageId: m.$id, from: m.from, generation: m.generation, type: m.type, payload: JSON.parse(m.payload) });
+    }
+    result.sort((a, b) => (a.type === 'candidate') - (b.type === 'candidate'));
+    return { messages: result.slice(0, 64), serverTimeMs: rooms.now() };
+  }
   async function peer(s, room, user, generation) {
     const viewer = user === room.hostId ? null : user;
     const candidates = viewer ? [await s.getPeer(peerId(room.$id, viewer))] : await s.listPeers(room.$id);
     const p = candidates.find(p => p?.generation === generation && p.state !== 'closed');
     if (!p) fail(409, 'STALE_GENERATION', 'Connection was replaced or closed');
     const host = await s.getMember(memberId(room.$id, p.hostId)), guest = await s.getMember(memberId(room.$id, p.viewerId));
-    if (!host || !guest || host.sessionId !== p.hostSession || guest.sessionId !== p.viewerSession ||
+    if (!host || !guest || host.revoked || guest.revoked || host.sessionId !== p.hostSession || guest.sessionId !== p.viewerSession ||
         [host, guest].some(m => Date.parse(m.lastSeenAt) + 120000 <= rooms.now())) fail(403, 'REMOTE_PEER_EXPIRED', 'Peer session expired');
     return p;
   }
   return {
+    messages,
     async connect(id, user, session, input) {
       exact(input, ['viewerId', 'restart', 'requestId']);
       if(input.requestId !== undefined && (typeof input.requestId !== 'string' || !idPattern.test(input.requestId))) fail(400,'INVALID_PEER','Invalid request identifier');
@@ -61,7 +75,7 @@ export function makeSignalingService(store, rooms) {
         const { room } = await rooms.authorize(s, id, user, session);
         if (room.hostId !== user || input.viewerId === user) fail(403, 'HOST_ONLY', 'Only host can authorize streaming');
         const viewer = await s.getMember(memberId(id, input.viewerId));
-        if (!viewer || Date.parse(viewer.lastSeenAt) + 120000 <= rooms.now()) fail(403, 'REMOTE_PEER_EXPIRED', 'Viewer offline');
+        if (!viewer || viewer.revoked || Date.parse(viewer.lastSeenAt) + 120000 <= rooms.now()) fail(403, 'REMOTE_PEER_EXPIRED', 'Viewer offline');
         const pid = peerId(id, input.viewerId), previous = await s.getPeer(pid);
         if (input.requestId && previous?.requestId === input.requestId && previous.hostSession === session && previous.viewerSession === viewer.sessionId) {
           if(previous.state === 'closed') fail(409,'STALE_GENERATION','Connection already closed');
@@ -112,7 +126,7 @@ export function makeSignalingService(store, rooms) {
         const expiresAt = new Date(Math.min(rooms.now() + 120000, Date.parse(room.expiresAt))).toISOString();
         await s.createSignal(sid, { roomId: id, from: user, to: input.to, generation: p.generation, type: input.type, payload,
           toSession: user === p.hostId ? p.viewerSession : p.hostSession, expiresAt });
-        // Realtime is only a wake-up hint. SDP/ICE remain server-private, fetched after membership checks.
+        // Private idempotency receipt only. No Appwrite user permissions or Realtime.
         await s.notify(sid, { roomId: id, userId: input.to, expiresAt, fingerprint });
         if (input.type === 'offer' || input.type === 'answer' || input.type === 'disconnect')
           await s.updatePeer(p.$id, { state: input.type === 'offer' ? 'offered' : input.type === 'answer' ? 'connected' : 'closed' });
@@ -121,21 +135,7 @@ export function makeSignalingService(store, rooms) {
     },
     async inbox(id, user, session) {
       // Read-only polls revalidate room revision and membership before responding.
-      return rooms.inspect(id, user, session, async (s, room) => {
-        const messages = [];
-        for (const m of await s.listSignals(id)) {
-          if (m.to !== user || m.toSession !== session || Date.parse(m.expiresAt) <= rooms.now()) continue;
-          // Disconnect is deliverable even though it closes the generation.
-          const p = await s.getPeer(peerId(id, user === room.hostId ? m.from : user));
-          if (!p || p.generation !== m.generation || (p.state === 'closed' && m.type !== 'disconnect')) continue;
-          messages.push({ messageId: m.$id, from: m.from, generation: m.generation, type: m.type, payload: JSON.parse(m.payload) });
-        }
-        // Offers must be applied before any trickled candidates regardless of database order.
-        messages.sort((a, b) => (a.type === 'candidate') - (b.type === 'candidate'));
-        // The native delivery ledger validates batches of at most 64 messages.
-        // Remaining messages stay stored until earlier batches are acknowledged.
-        return { messages: messages.slice(0, 64), serverTimeMs: rooms.now() };
-      });
+      return rooms.inspect(id, user, session, (s, room) => messages(s, room, user, session));
     },
     async ack(id, user, session, input) {
       exact(input, ['messageIds']);

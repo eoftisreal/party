@@ -77,7 +77,7 @@ test('a viewer leaving while a room snapshot is collected revokes membership',as
     if(!left){left=true;await f.rooms.leave(id,'viewer',f.v.sessionId);}
     return peers;
   };
-  await assert.rejects(f.rooms.read(f.r.roomId,'viewer',f.v.sessionId),rejected('NOT_A_MEMBER'));
+  await assert.rejects(f.rooms.read(f.r.roomId,'viewer',f.v.sessionId),rejected('CREDENTIAL_REVOKED'));
 });
 
 test('cleanup rechecks expiry after a racing host heartbeat',async()=>{

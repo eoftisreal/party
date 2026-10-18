@@ -1,10 +1,9 @@
-// Live coordination smoke, not a media/Realtime test. Defaults to two temporary guests.
+// Live coordination smoke, not a media/Realtime test. Uses account-free room capabilities.
 import assert from 'node:assert/strict';
 import {randomBytes} from 'node:crypto';
 const base=process.env.PARTY_FUNCTION_URL;
-let host=process.env.PARTY_HOST_JWT,viewer=process.env.PARTY_VIEWER_JWT;
+let host,viewer;
 if(!base?.startsWith('https://'))throw Error('Need HTTPS PARTY_FUNCTION_URL');
-if(Boolean(host)!==Boolean(viewer))throw Error('Supply both legacy JWTs or leave both unset for guests');
 const id=()=>randomBytes(16).toString('hex');
 // Slow Cloud requests can outlast the server's 120-second membership leases.
 // Refresh through the existing authenticated heartbeat API; do not weaken the lease.
@@ -46,24 +45,19 @@ function sdp(direction){return ['v=0','o=- 1 1 IN IP4 127.0.0.1','s=coordination
   'a=fingerprint:sha-256 '+Array(32).fill('AA').join(':'),
   'm=video 9 UDP/TLS/RTP/SAVPF 96','a=mid:video','a='+direction,'a=rtpmap:96 H264/90000',
   'm=audio 9 UDP/TLS/RTP/SAVPF 111','a=mid:audio','a='+direction,'a=rtpmap:111 opus/48000/2',''].join('\r\n');}
-if(!host){
-  const h=await call(null,'POST','/v1/guest',{}),v=await call(null,'POST','/v1/guest',{});
-  assert.equal(h.status,201);assert.equal(v.status,201);
-  host=h.body.guestToken;viewer=v.body.guestToken;
-}
-const created=await call(host,'POST','/v1/rooms',{title:'Live deployment smoke'});
+const created=await call(null,'POST','/v1/rooms',{title:'Live deployment smoke',requestKey:id()+id()});
 assert.equal(created.status,201,`Room creation returned HTTP ${created.status}; inspect this execution's party_backend_error log for operation/status/errorType. Do not share JWTs, API keys, or request bodies.`);
-const r=created.body,path='/v1/rooms/'+r.roomId;
+const r=created.body,path='/v1/rooms/'+r.roomId;host=r.partyToken;
 leaseRoomPath=path;
 leases.push({token:host,session:r.sessionId,refreshedAt:Date.now()});
 let viewerLease;
 let closed=false;
 try{
   assert.equal((await call('invalid','GET',path)).status,401);
-  assert.equal((await call(viewer,'GET',path)).status,403);
+  assert.equal((await call('party_'+'f'.repeat(64),'GET',path,undefined,r.sessionId)).status,403);
   assert.equal((await call(viewer,'POST',path+'/join',{inviteCode:'x'.repeat(32)})).status,403);
   const joined=await call(viewer,'POST',path+'/join',{inviteCode:r.inviteCode});assert.equal(joined.status,200);
-  const v=joined.body;assert.notEqual(v.yourUserId,r.yourUserId,'Smoke test needs two different identities');
+  const v=joined.body;viewer=v.partyToken;assert.notEqual(v.yourUserId,r.yourUserId,'Smoke test needs two different identities');
   viewerLease={token:viewer,session:v.sessionId,refreshedAt:Date.now()};
   leases.push(viewerLease);
   assert.equal((await call(viewer,'POST',path+'/peers',{viewerId:r.hostId},v.sessionId)).status,403);
@@ -88,11 +82,9 @@ try{
   assert.notEqual(next.body.generation,p.body.generation);
   assert.equal((await call(host,'POST',path+'/peers',restart,r.sessionId)).body.generation,next.body.generation,'Restart retry rotated generation');
   assert.equal((await call(host,'POST',path+'/signals',{...ice,messageId:id()},r.sessionId)).body.error.code,'STALE_GENERATION');
-  const rejoined=await call(viewer,'POST',path+'/join',{});assert.equal(rejoined.status,200);
-  viewerLease.session=rejoined.body.sessionId;
-  viewerLease.refreshedAt=Date.now();
-  assert.equal((await call(viewer,'GET',path+'/signals',undefined,v.sessionId)).body.error.code,'STALE_SESSION');
-  assert.equal((await call(viewer,'POST',path+'/leave',{},rejoined.body.sessionId)).status,200);
+  const renewal=await call(viewer,'POST',path+'/join',{previousSession:v.sessionId,requestId:id()});
+  assert.equal(renewal.body.error.code,'LEASE_ACTIVE');
+  assert.equal((await call(viewer,'POST',path+'/leave',{},v.sessionId)).status,200);
   leases.splice(leases.indexOf(viewerLease),1);
   assert.equal((await call(host,'POST',path+'/peers',{viewerId:v.yourUserId},r.sessionId)).body.error.code,'REMOTE_PEER_EXPIRED');
   assert.equal((await call(host,'POST',path+'/heartbeat',{},r.sessionId)).status,200);
@@ -100,7 +92,7 @@ try{
   closed=true;
   leases.length=0;
   assert.equal((await call(viewer,'GET',path+'/signals',undefined,v.sessionId)).status,410);
-  console.log('Coordination smoke passed: authentication, invitation, SDP/ICE delivery, post-ACK retry, generation/session replacement, departure and closure. Media, Realtime, real JWT renewal and expiry require external tests.');
+  console.log('Coordination smoke passed: authentication, invitation, SDP/ICE delivery, post-ACK retry, generation/session replacement, departure and closure. Media and live deployment expiry require external tests.');
 }finally{
   if(!closed) try {
     const cleanup=await request(host,'POST',path+'/close',{},r.sessionId);

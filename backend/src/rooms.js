@@ -8,7 +8,7 @@ export const peerId = (room, user) => digest(`peer:${room}:${user}`).slice(0, 32
 export const reconnectWindowMs = 30 * 60 * 1000;
 export const idPattern = /^[a-f0-9]{32}$/;
 export function fail(status, code, message) { throw new ApiError(status, code, message); }
-export function makeRoomsService(store, { now = () => Date.now(), random = randomBytes, createLimitPerHour = 0, maxViewers = 5 } = {}) {
+export function makeRoomsService(store, { now = () => Date.now(), random = randomBytes, createLimitPerHour = 120, maxViewers = 5 } = {}) {
   if (!Number.isSafeInteger(createLimitPerHour) || createLimitPerHour < 0 || createLimitPerHour > 10000)
     throw Error('Invalid createLimitPerHour (expected integer 0..10000)');
   if (!Number.isSafeInteger(maxViewers) || maxViewers < 1 || maxViewers > 16)
@@ -37,6 +37,7 @@ export function makeRoomsService(store, { now = () => Date.now(), random = rando
     const room = s.isTransaction ? await lockRoom(s, id) : await get(s, id); active(room);
     const m = await s.getMember(memberId(id, user));
     if (!m) fail(403, 'NOT_A_MEMBER', 'Not a room member');
+    if (m.revoked) fail(403, 'CREDENTIAL_REVOKED', 'Membership was revoked');
     if (requireSession && (!idPattern.test(session || '') || session !== m.sessionId))
       fail(403, 'STALE_SESSION', 'Join again; session was replaced');
     if (requireSession && !allowOffline && Date.parse(m.lastSeenAt) + 120000 <= now()) fail(403, 'PEER_EXPIRED', 'Peer lease expired; join again');
@@ -56,15 +57,24 @@ export function makeRoomsService(store, { now = () => Date.now(), random = rando
   }
   function safe(r, ms, user, session) {
     return { roomId: r.$id, title: r.title, hostId: r.hostId, status: r.status, expiresAt: r.expiresAt, maxViewers,
-      participants: ms.map(m => ({ userId: m.userId, joinedAt: m.joinedAt, online: Date.parse(m.lastSeenAt) + 120000 > now(), ...(r.hostId === user ? { sessionVersion: digest(m.sessionId || '') } : {}) })),
+      participants: ms.filter(m => !m.revoked).map(m => ({ userId: m.userId, joinedAt: m.joinedAt, online: Date.parse(m.lastSeenAt) + 120000 > now(), ...(r.hostId === user ? { sessionVersion: digest(m.sessionId || '') } : {}) })),
       yourUserId: user, yourRole: r.hostId === user ? 'host' : 'viewer', ...(session ? { sessionId: session } : {}), serverTimeMs: now() };
   }
   async function revoke(s, id, user) {
     for (const p of await s.listPeers(id)) if (p.hostId === user || p.viewerId === user) await s.updatePeer(p.$id, { state: 'closed' });
     for (const m of await s.listSignals(id)) if (m.from === user || m.to === user) await s.deleteSignal(m.$id);
   }
-  async function limit(user, kind) {
-    const max = kind === 'create' ? createLimitPerHour : 30;
+  async function view(s, room, user) {
+    const members = (await s.listMembers(room.$id)).filter(m => !m.revoked);
+    const peers = await s.listPeers(room.$id);
+    const live = peers.filter(p => members.some(m => m.userId === p.hostId && m.sessionId === p.hostSession) &&
+      members.some(m => m.userId === p.viewerId && m.sessionId === p.viewerSession));
+    const connections = live.map(p => ({ generation: p.generation, viewerId: p.viewerId,
+      state: [p.hostId, p.viewerId].every(id => members.some(m => m.userId === id && Date.parse(m.lastSeenAt) + 120000 > now())) ? p.state : 'closed' }));
+    const visible = user === room.hostId ? connections : connections.filter(p => p.viewerId === user);
+    return { ...safe(room, members, user), connections: visible, connection: visible.length === 1 ? visible[0] : null };
+  }
+  async function limit(user, kind, max = kind === 'create' ? createLimitPerHour : 30) {
     if (max === 0) return; // Development default: unlimited room creation; skips the extra Appwrite transaction.
     await store.atomic(async s => {
       const id=digest('limit:'+user).slice(0,32);
@@ -79,13 +89,21 @@ export function makeRoomsService(store, { now = () => Date.now(), random = rando
     });
   }
   return {
-    authorize, active, inspect, token, timestamp, now,
-    async create(user, input = {}) {
+    authorize, active, inspect, token, timestamp, now, limit,
+    async create(user, input = {}, bootstrap = {}) {
       const title = input.title ?? 'Watch party';
       if (typeof title !== 'string' || !title.trim() || title.trim().length > 80) fail(400, 'INVALID_TITLE', 'Title must be 1 to 80 characters');
-      await limit(user,'create');
-      const id = token(), inviteCode = random(24).toString('base64url'), sessionId = token();
+      await limit(bootstrap.budgetIdentity || user,'create');
+      const id = bootstrap.roomId || token(), inviteCode = bootstrap.inviteCode || random(24).toString('base64url'), sessionId = token();
       return store.atomic(async s => {
+        const existing = await s.getRoom(id);
+        if (existing) {
+          active(existing);
+          if (existing.hostId !== user) fail(403, 'NOT_A_MEMBER', 'Not a room member');
+          const member = await s.getMember(memberId(id, user));
+          if (!member || member.revoked) fail(403, 'CREDENTIAL_REVOKED', 'Membership was revoked');
+          return { ...safe(existing, await s.listMembers(id), user, member.sessionId), inviteCode };
+        }
         const r = await s.createRoom(id, { hostId: user, title: title.trim(), inviteHash: digest(inviteCode), status: 'open', revision: 0,
           expiresAt: new Date(now() + reconnectWindowMs).toISOString() });
         const m = { roomId: id, userId: user, joinedAt: timestamp(), lastSeenAt: timestamp(), sessionId, rateWindow: 0, rateCount: 0 };
@@ -103,6 +121,8 @@ export function makeRoomsService(store, { now = () => Date.now(), random = rando
       return store.atomic(async s => {
         const r = await lockRoom(s, id); active(r);
         const mid = memberId(id, user), existing = await s.getMember(mid);
+        if (existing?.revoked) fail(403, 'CREDENTIAL_REVOKED', 'Membership was revoked');
+        if (existing && renewal.bootstrapRetry) return safe(r, await s.listMembers(id), user, existing.sessionId);
         const renewed=renewing?digest(`renew:${id}:${user}:${renewal.previousSession}:${renewal.requestId}`).slice(0,32):null;
         if(renewing) {
           if(!existing)fail(403,'NOT_A_MEMBER','Membership no longer exists');
@@ -121,10 +141,10 @@ export function makeRoomsService(store, { now = () => Date.now(), random = rando
           if (a.length !== b.length || !timingSafeEqual(a, b)) fail(403, 'INVALID_INVITE', 'Invalid invite');
           const members = await s.listMembers(id);
           // One host + configurable viewers; stale viewers are explicitly removed before admitting another.
-          for (const m of members) if (m.userId !== r.hostId && Date.parse(m.lastSeenAt) + reconnectWindowMs <= now()) {
-            await revoke(s, id, m.userId); await s.deleteMember(memberId(id, m.userId));
+          for (const m of members) if (!m.revoked && m.userId !== r.hostId && Date.parse(m.lastSeenAt) + reconnectWindowMs <= now()) {
+            await revoke(s, id, m.userId); await s.updateMember(memberId(id, m.userId), { revoked: 'yes' });
           }
-          if ((await s.listMembers(id)).length >= maxViewers + 1) fail(409, 'ROOM_FULL', 'Watch party is full');
+          if ((await s.listMembers(id)).filter(m => !m.revoked).length >= maxViewers + 1) fail(409, 'ROOM_FULL', 'Watch party is full');
         } else await revoke(s, id, user);
         const sessionId = renewed || token();
         const m = { roomId: id, userId: user, joinedAt: existing?.joinedAt || timestamp(), lastSeenAt: timestamp(), sessionId, rateWindow: 0, rateCount: 0 };
@@ -137,25 +157,23 @@ export function makeRoomsService(store, { now = () => Date.now(), random = rando
       });
     },
     async read(id, user, session) {
-      return inspect(id, user, session, async (s, room) => {
-        const members=await s.listMembers(id);
-        const peers=await s.listPeers(id);
-        // Each viewer has an independent generation and session. A stopped viewer
-        // must not terminate the other viewer connections.
-        const live = peers.filter(p => members.some(m => m.userId === p.hostId && m.sessionId === p.hostSession) &&
-          members.some(m => m.userId === p.viewerId && m.sessionId === p.viewerSession));
-        const connections = live.map(p => {
-          const host = members.find(m => m.userId === p.hostId);
-          const viewer = members.find(m => m.userId === p.viewerId);
-          const online = [host, viewer].every(m => Date.parse(m.lastSeenAt) + 120000 > now());
-          return { generation: p.generation, viewerId: p.viewerId, state: online ? p.state : 'closed' };
-        });
-        const visible = user === room.hostId ? connections : connections.filter(p => p.viewerId === user);
-        return { ...safe(room, members, user),
-          connections: visible,
-          // Backward compatible for a single viewer and existing client integrations.
-          connection: visible.length === 1 ? visible[0] : null };
-      }, Boolean(session));
+      return inspect(id, user, session, (s, room) => view(s, room, user), Boolean(session));
+    },
+    async sync(id, user, session, messages) {
+      // One coherent read/revalidation boundary for authority and inbox; no transaction.
+      return inspect(id, user, session, async (s, room) => ({
+        room: await view(s, room, user), ...(await messages(s, room, user, session)) }));
+    },
+    async revokeMember(id, user, session, viewerId) {
+      return store.atomic(async s => {
+        const { room } = await authorize(s, id, user, session);
+        if (room.hostId !== user || viewerId === user) fail(403, 'HOST_ONLY', 'Only host can revoke viewers');
+        const mid = memberId(id, viewerId), member = await s.getMember(mid);
+        if (!member) fail(404, 'NOT_A_MEMBER', 'Not a room member');
+        await revoke(s, id, viewerId);
+        await s.updateMember(mid, { revoked: 'yes' });
+        return { revoked: true };
+      });
     },
     async heartbeat(id, user, session) {
       return store.atomic(async s => {
@@ -170,7 +188,7 @@ export function makeRoomsService(store, { now = () => Date.now(), random = rando
         const { room } = await authorize(s, id, user, session, true, true);
         await revoke(s, id, user);
         if (room.hostId === user) await s.updateRoom(id, { status: 'closed', revision: (room.revision || 0) + 1 });
-        else await s.deleteMember(memberId(id, user));
+        else await s.updateMember(memberId(id, user), { revoked: 'yes' });
         return { left: true, roomClosed: room.hostId === user };
       });
     },

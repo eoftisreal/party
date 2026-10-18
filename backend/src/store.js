@@ -1,4 +1,4 @@
-import { Client, Databases, Account, Query, Permission, Role } from 'node-appwrite';
+import { Client, Databases, Query } from 'node-appwrite';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { appwriteOperation } from './diagnostics.js';
 
@@ -49,7 +49,7 @@ export function makeAppwriteStore(env, runtimeKey, { wait = sleep, random = Math
       getReceipt: id => get('notifications', id),
       getLimit: id => get('limits', id), createLimit: (id,data) => create('limits',id,data), updateLimit: (id,data) => update('limits',id,data),
       notify: async (id, data) => {
-        if (!await get('notifications', id)) return create('notifications', id, data, data.userId.startsWith('g_') ? [] : [Permission.read(Role.user(data.userId))]);
+        if (!await get('notifications', id)) return create('notifications', id, data);
       },
       listNotifications: () => list('notifications', []), deleteNotification: id => remove('notifications', id),
       listRooms: () => list('rooms', []),
@@ -73,10 +73,4 @@ export function makeAppwriteStore(env, runtimeKey, { wait = sleep, random = Math
     }
   };
   return root;
-}
-export async function verifyUserJWT(token, env) {
-  const endpoint = env.APPWRITE_FUNCTION_API_ENDPOINT || env.APPWRITE_ENDPOINT;
-  const project = env.APPWRITE_FUNCTION_PROJECT_ID || env.APPWRITE_PROJECT_ID;
-  if (!endpoint || !project) throw Error('Missing project info');
-  return (await appwriteOperation('account.get', () => new Account(new Client().setEndpoint(endpoint).setProject(project).setJWT(token)).get())).$id;
 }
