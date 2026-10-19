@@ -2,6 +2,47 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {Client} from 'node-appwrite';
 import {makeAppwriteStore} from '../src/store.js';
+import {limits} from '../src/protocol.js';
+import {coordinationIndexes} from '../src/schema.js';
+test('transaction cache reuses isolated reads, invalidates mutations and never caches root authorization reads',async()=>{
+  const original=Client.prototype.call;let gets=0;const documents=new Map();
+  Client.prototype.call=async function(method,url,_headers,payload){
+    if(url.pathname.endsWith('/databases/transactions'))return {$id:'tx'};
+    if(url.pathname.includes('/databases/transactions/'))return {};
+    const id=url.pathname.split('/').at(-1);
+    if(method==='get'){++gets;return structuredClone(documents.get(id)||{$id:id,sessionId:'initial'});}
+    const value={$id:id,...documents.get(id),...payload.data};documents.set(id,value);return structuredClone(value);
+  };
+  try {
+    const store=makeAppwriteStore({APPWRITE_ENDPOINT:'https://example.test/v1',APPWRITE_PROJECT_ID:'test',PARTY_DATABASE_ID:'party'},'key');
+    await store.atomic(async s=>{
+      const first=await s.getMember('member');first.sessionId='caller-mutation';
+      assert.equal((await s.getMember('member')).sessionId,'initial');assert.equal(gets,1);
+      await s.updateMember('member',{sessionId:'renewed'});
+      assert.equal((await s.getMember('member')).sessionId,'renewed');assert.equal(gets,2);
+    });
+    assert.equal((await store.getMember('member')).sessionId,'renewed');
+    documents.set('member',{$id:'member',sessionId:'revoked'});
+    assert.equal((await store.getMember('member')).sessionId,'revoked');assert.equal(gets,4);
+  } finally {Client.prototype.call=original;}
+});
+test('SDK inbox and cleanup use bounded indexed recipient/expiry queries',async()=>{
+  const original=Client.prototype.call,calls=[];
+  Client.prototype.call=async function(_method,url,_headers,payload){calls.push({path:url.pathname,queries:payload.queries.map(q=>JSON.parse(q))});return {documents:[]};};
+  try {
+    const store=makeAppwriteStore({APPWRITE_ENDPOINT:'https://example.test/v1',APPWRITE_PROJECT_ID:'test',PARTY_DATABASE_ID:'party'},'key');
+    const at=new Date().toISOString();
+    await store.listInbox('room','viewer','session',at);
+    const inbox=calls[0].queries;
+    assert.deepEqual(inbox.filter(q=>q.method==='equal').map(q=>q.attribute),coordinationIndexes.signals.inbox.slice(0,3));
+    assert.ok(inbox.some(q=>q.method==='greaterThan' && q.attribute==='expiresAt' && q.values[0]===at));
+    await store.listCleanupRooms('closed',at);await store.listExpiredSignals(at);await store.listExpiredNotifications(at);
+    for(const [index,maximum] of [[1,limits.cleanupRooms],[2,limits.cleanupExpired],[3,limits.cleanupExpired]]) {
+      assert.ok(calls[index].queries.some(q=>q.method==='limit' && q.values[0]===maximum));
+      assert.ok(calls[index].queries.some(q=>q.method==='lessThanEqual' && q.attribute==='expiresAt'));
+    }
+  } finally {Client.prototype.call=original;}
+});
 test('actual Appwrite SDK sends transactionId, private signal and receipt permissions',async()=>{
   const original=Client.prototype.call,calls=[];
   Client.prototype.call=async function(method,url,headers,payload){

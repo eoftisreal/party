@@ -1,4 +1,5 @@
 import { randomBytes, createHash, timingSafeEqual } from 'node:crypto';
+import { limits } from './protocol.js';
 export class ApiError extends Error {
   constructor(status, code, message) { super(message); this.status = status; this.code = code; }
 }
@@ -27,8 +28,8 @@ export function makeRoomsService(store, { now = () => Date.now(), random = rando
   }
   async function lockRoom(s, id) {
     // Atomic increment avoids computing a revision from a stale preliminary read.
-    await get(s, id);
-    await s.bumpRoom(id);
+    if (!idPattern.test(id || '')) fail(400, 'INVALID_ROOM_ID', 'Invalid room identifier');
+    try { await s.bumpRoom(id); } catch (e) { if (e.code === 404) fail(404, 'ROOM_NOT_FOUND', 'Room not found'); throw e; }
     // Stage the write BEFORE authorization, then re-read the staged document.
     // Appwrite transactions are optimistic; an unstaged preliminary read is not a lock.
     return get(s, id);
@@ -61,8 +62,9 @@ export function makeRoomsService(store, { now = () => Date.now(), random = rando
       yourUserId: user, yourRole: r.hostId === user ? 'host' : 'viewer', ...(session ? { sessionId: session } : {}), serverTimeMs: now() };
   }
   async function revoke(s, id, user) {
-    for (const p of await s.listPeers(id)) if (p.hostId === user || p.viewerId === user) await s.updatePeer(p.$id, { state: 'closed' });
-    for (const m of await s.listSignals(id)) if (m.from === user || m.to === user) await s.deleteSignal(m.$id);
+    for (const p of await s.listPeers(id)) if (p.state !== 'closed' && (p.hostId === user || p.viewerId === user)) await s.updatePeer(p.$id, { state: 'closed' });
+    // Closed generations are never delivered. TTL cleanup drains their queues
+    // without making a host revocation/closure delete an entire room inbox.
   }
   async function view(s, room, user) {
     const members = (await s.listMembers(room.$id)).filter(m => !m.revoked);
@@ -88,12 +90,31 @@ export function makeRoomsService(store, { now = () => Date.now(), random = rando
       await s.updateLimit(id,{[kind+'Window']:window,[kind+'Count']:count+1});
     });
   }
+  async function publicLimit(kind, entropy, max = kind === 'create' ? createLimitPerHour : 300) {
+    if (max === 0) return;
+    const shards = Math.min(limits.publicBudgetShards, max);
+    const start = parseInt(digest(entropy).slice(0, 8), 16) % shards;
+    // Fixed per-shard quotas sum to the exact service budget. Spill to another
+    // shard only when full; no cross-room shared write on the normal path.
+    for (let offset = 0; offset < shards; ++offset) {
+      const shard = (start + offset) % shards;
+      const quota = Math.floor(max / shards) + (shard < max % shards ? 1 : 0);
+      try { await limit(`public-${kind}:${shard}`, kind, quota); return; }
+      catch (e) { if (e.code !== 'RATE_LIMIT') throw e; }
+    }
+    fail(429, 'RATE_LIMIT', 'Too many room requests');
+  }
+  async function heartbeatIn(s, id, user, room) {
+    await s.updateMember(memberId(id, user), { lastSeenAt: timestamp() });
+    if (room.hostId === user) await s.updateRoom(id, { expiresAt: new Date(now() + reconnectWindowMs).toISOString() });
+  }
   return {
-    authorize, active, inspect, token, timestamp, now, limit,
+    authorize, active, inspect, token, timestamp, now, limit, publicLimit, heartbeatIn, view,
     async create(user, input = {}, bootstrap = {}) {
       const title = input.title ?? 'Watch party';
       if (typeof title !== 'string' || !title.trim() || title.trim().length > 80) fail(400, 'INVALID_TITLE', 'Title must be 1 to 80 characters');
-      await limit(bootstrap.budgetIdentity || user,'create');
+      if (bootstrap.budgetIdentity) await publicLimit('create', user);
+      else await limit(user,'create');
       const id = bootstrap.roomId || token(), inviteCode = bootstrap.inviteCode || random(24).toString('base64url'), sessionId = token();
       return store.atomic(async s => {
         let existing = await s.getRoom(id);
@@ -118,7 +139,8 @@ export function makeRoomsService(store, { now = () => Date.now(), random = rando
     },
     async join(id, user, invite, renewal = {}) {
       const renewing=renewal.previousSession!==undefined || renewal.requestId!==undefined;
-      if(renewing && (!idPattern.test(renewal.previousSession||'') || !idPattern.test(renewal.requestId||'')))
+      if(renewing && (typeof renewal.previousSession !== 'string' || typeof renewal.requestId !== 'string' ||
+        !idPattern.test(renewal.previousSession) || !idPattern.test(renewal.requestId)))
         fail(400,'INVALID_RENEWAL','Previous session and request identifier required');
       // New guests have no prior identity. Apply the join-attempt budget per room,
       // including failed invitations, instead of letting each attempt mint a new identity.
@@ -150,11 +172,13 @@ export function makeRoomsService(store, { now = () => Date.now(), random = rando
           const a = Buffer.from(digest(invite), 'hex'), b = Buffer.from(r.inviteHash, 'hex');
           if (a.length !== b.length || !timingSafeEqual(a, b)) fail(403, 'INVALID_INVITE', 'Invalid invite');
           const members = await s.listMembers(id);
+          if (members.length >= limits.memberRecords) fail(409, 'ROOM_MEMBERSHIP_LIMIT', 'Start a new room to admit more participant identities');
           // One host + configurable viewers; stale viewers are explicitly removed before admitting another.
           for (const m of members) if (!m.revoked && m.userId !== r.hostId && Date.parse(m.lastSeenAt) + reconnectWindowMs <= now()) {
             await revoke(s, id, m.userId); await s.updateMember(memberId(id, m.userId), { revoked: 'yes' });
           }
-          if ((await s.listMembers(id)).filter(m => !m.revoked).length >= maxViewers + 1) fail(409, 'ROOM_FULL', 'Watch party is full');
+          if (members.filter(m => !m.revoked && (m.userId === r.hostId || Date.parse(m.lastSeenAt) + reconnectWindowMs > now())).length >= maxViewers + 1)
+            fail(409, 'ROOM_FULL', 'Watch party is full');
         } else await revoke(s, id, user);
         const sessionId = renewed || token();
         const m = { roomId: id, userId: user, joinedAt: existing?.joinedAt || timestamp(), lastSeenAt: timestamp(), sessionId, rateWindow: 0, rateCount: 0 };
@@ -188,8 +212,7 @@ export function makeRoomsService(store, { now = () => Date.now(), random = rando
     async heartbeat(id, user, session) {
       return store.atomic(async s => {
         const { room } = await authorize(s, id, user, session);
-        await s.updateMember(memberId(id, user), { lastSeenAt: timestamp() });
-        if (room.hostId === user) await s.updateRoom(id, { expiresAt: new Date(now() + reconnectWindowMs).toISOString() });
+        await heartbeatIn(s, id, user, room);
         return { ok: true, serverTimeMs: now() };
       });
     },
@@ -212,29 +235,46 @@ export function makeRoomsService(store, { now = () => Date.now(), random = rando
     },
     async cleanup() {
       // Scheduled invocation only, never routed through the public HTTP API.
-      for (const r of await store.listRooms()) if (r.status === 'open' && Date.parse(r.expiresAt) <= now()) {
+      const candidates = async (status, before) => store.listCleanupRooms
+        ? store.listCleanupRooms(status, new Date(before).toISOString())
+        : (await store.listRooms()).filter(r => r.status === status && Date.parse(r.expiresAt) <= before).slice(0, limits.cleanupRooms);
+      for (const r of await candidates('open', now())) {
         await store.atomic(async s => {
           const fresh = await lockRoom(s, r.$id);
           if (fresh.status !== 'open' || Date.parse(fresh.expiresAt) > now()) return;
-          await revoke(s, r.$id, fresh.hostId);
+          // Closing the room invalidates every credential immediately. Queue
+          // deletion belongs to bounded GC, not this authorization transaction.
           await s.updateRoom(r.$id, { status: 'closed', revision: (fresh.revision || 0) + 1 });
         });
       }
       // Closed rooms are retained until one day after their original expiry for diagnostics.
-      // Transactionally delete all dependent records; never prune an active room.
-      for (const r of await store.listRooms()) if(r.status==='closed' && Date.parse(r.expiresAt)+86400000<=now()) {
+      // Drain dependencies in bounded transactions; retain the room fence until
+      // the last batch so concurrent cleanup cannot orphan a dependent record.
+      for (const r of await candidates('closed', now() - 86400000)) {
         await store.atomic(async s=>{
           const fresh=await lockRoom(s,r.$id);
           if(fresh.status!=='closed' || Date.parse(fresh.expiresAt)+86400000>now())return;
-          for(const m of await s.listSignals(r.$id))await s.deleteSignal(m.$id);
-          for(const p of await s.listPeers(r.$id))await s.deletePeer(p.$id);
-          for(const m of await s.listMembers(r.$id))await s.deleteMember(m.$id);
+          let remaining = limits.cleanupWrites, pending = false;
+          for (const [list, remove] of [[s.listSignals, s.deleteSignal], [s.listPeers, s.deletePeer], [s.listMembers, s.deleteMember]]) {
+            const records = await list(r.$id);
+            for (const record of records.slice(0, remaining)) await remove(record.$id);
+            if (records.length > remaining) pending = true;
+            remaining = Math.max(0, remaining - records.length);
+          }
+          if (pending) return;
+          if (s.deleteLimit) {
+            const budget = digest('limit:join-room:' + r.$id).slice(0, 32);
+            if (await s.getLimit(budget)) await s.deleteLimit(budget);
+          }
           await s.deleteRoom(r.$id);
         });
       }
-      for (const r of await store.listRooms()) for (const m of await store.listSignals(r.$id))
-        if (Date.parse(m.expiresAt) <= now()) { try { await store.deleteSignal(m.$id); } catch (e) { if (e.code !== 404) throw e; } }
-      for (const n of await store.listNotifications()) if (Date.parse(n.expiresAt) <= now()) {
+      const expiredSignals = store.listExpiredSignals ? await store.listExpiredSignals(timestamp()) :
+        (await Promise.all((await store.listRooms()).map(r => store.listSignals(r.$id)))).flat().filter(m => Date.parse(m.expiresAt) <= now()).slice(0, limits.cleanupExpired);
+      for (const m of expiredSignals) { try { await store.deleteSignal(m.$id); } catch (e) { if (e.code !== 404) throw e; } }
+      const expiredReceipts = store.listExpiredNotifications ? await store.listExpiredNotifications(timestamp()) :
+        (await store.listNotifications()).filter(n => Date.parse(n.expiresAt) <= now()).slice(0, limits.cleanupExpired);
+      for (const n of expiredReceipts) {
         try { await store.deleteNotification(n.$id); } catch (e) { if (e.code !== 404) throw e; }
       }
       return { cleaned: true };

@@ -1,4 +1,5 @@
 import { digest, idPattern, peerId, memberId, fail } from './rooms.js';
+import { contract, limits } from './protocol.js';
 
 const userPattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,35}$/;
 function object(value) { return value && typeof value === 'object' && !Array.isArray(value); }
@@ -44,7 +45,8 @@ export function validateSignal(input) {
 export function makeSignalingService(store, rooms) {
   async function messages(s, room, user, session) {
     const result = [], peers = new Map();
-    for (const m of await s.listSignals(room.$id)) {
+    const inbox = s.listInbox ? await s.listInbox(room.$id, user, session, rooms.timestamp()) : await s.listSignals(room.$id);
+    for (const m of inbox) {
       if (m.to !== user || m.toSession !== session || Date.parse(m.expiresAt) <= rooms.now()) continue;
       const id = peerId(room.$id, user === room.hostId ? m.from : user);
       if (!peers.has(id)) peers.set(id, await s.getPeer(id));
@@ -53,17 +55,65 @@ export function makeSignalingService(store, rooms) {
       result.push({ messageId: m.$id, from: m.from, generation: m.generation, type: m.type, payload: JSON.parse(m.payload) });
     }
     result.sort((a, b) => (a.type === 'candidate') - (b.type === 'candidate'));
-    return { messages: result.slice(0, 64), serverTimeMs: rooms.now() };
+    return { messages: result.slice(0, limits.inboxBatch), serverTimeMs: rooms.now() };
   }
-  async function peer(s, room, user, generation) {
-    const viewer = user === room.hostId ? null : user;
-    const candidates = viewer ? [await s.getPeer(peerId(room.$id, viewer))] : await s.listPeers(room.$id);
-    const p = candidates.find(p => p?.generation === generation && p.state !== 'closed');
+  async function peer(s, room, user, generation, target) {
+    const p = await s.getPeer(peerId(room.$id, user === room.hostId ? target : user));
+    if (!p && user === room.hostId) fail(403, 'INVALID_TARGET', 'Signals must go between authorized host and viewer');
+    if (!p || p.generation !== generation || p.state === 'closed') fail(409, 'STALE_GENERATION', 'Connection was replaced or closed');
     if (!p) fail(409, 'STALE_GENERATION', 'Connection was replaced or closed');
     const host = await s.getMember(memberId(room.$id, p.hostId)), guest = await s.getMember(memberId(room.$id, p.viewerId));
     if (!host || !guest || host.revoked || guest.revoked || host.sessionId !== p.hostSession || guest.sessionId !== p.viewerSession ||
         [host, guest].some(m => Date.parse(m.lastSeenAt) + 120000 <= rooms.now())) fail(403, 'REMOTE_PEER_EXPIRED', 'Peer session expired');
     return p;
+  }
+  async function sendIn(s, id, user, session, input, authority) {
+    const {room, member} = authority;
+    const sid = digest(`${id}:${session}:${input.messageId}`).slice(0, 32);
+    const fingerprint = digest(JSON.stringify([input.to,input.generation,input.type,input.payload]));
+    const receipt = await s.getReceipt(sid);
+    if(receipt?.fingerprint && Date.parse(receipt.expiresAt)>rooms.now()) {
+      if(receipt.fingerprint !== fingerprint) fail(409,'MESSAGE_REUSE','Message identifier reused');
+      return {accepted:true,messageId:sid}; // Completed delivery stays idempotent after ACK deletion.
+    }
+    const p = await peer(s, room, user, input.generation, input.to);
+    const other = user === p.hostId ? p.viewerId : p.hostId;
+    if (input.to !== other) fail(403, 'INVALID_TARGET', 'Signals must go between authorized host and viewer');
+    if ((input.type === 'offer' && user !== p.hostId) || (input.type === 'answer' && user !== p.viewerId))
+      fail(403, 'HOST_ONLY', 'Viewer cannot send media offers');
+    const payload = JSON.stringify(input.payload), existing = await s.getSignal(sid);
+    if (existing) {
+      if (existing.payload !== payload || existing.type !== input.type || existing.generation !== input.generation || existing.to !== input.to)
+        fail(409, 'MESSAGE_REUSE', 'Message identifier reused');
+      return { accepted: true, messageId: sid };
+    }
+    const transition = contract.signaling.transitions[input.type];
+    if (transition?.from && p.state !== transition.from)
+      fail(409, 'SIGNAL_ORDER', 'Invalid negotiation order');
+    const window = Math.floor(rooms.now() / 60000), count = member.rateWindow === window ? member.rateCount : 0;
+    if (count >= 180) fail(429, 'RATE_LIMIT', 'Too many signaling messages');
+    const queued = authority.queued ??= await s.listSignals(id);
+    const outstanding = queued.filter(m => Date.parse(m.expiresAt) > rooms.now());
+    // A busy viewer cannot starve signaling for everyone else in the room.
+    if (outstanding.filter(m => m.to === input.to).length >= 48 || outstanding.length >= 256)
+      fail(429, 'INBOX_FULL', 'Peer inbox is full');
+    await s.updateMember(memberId(id, user), { rateWindow: window, rateCount: count + 1 });
+    member.rateWindow = window; member.rateCount = count + 1;
+    const expiresAt = new Date(Math.min(rooms.now() + 120000, Date.parse(room.expiresAt))).toISOString();
+    const created = await s.createSignal(sid, { roomId: id, from: user, to: input.to, generation: p.generation, type: input.type, payload,
+      toSession: user === p.hostId ? p.viewerSession : p.hostSession, expiresAt });
+    queued.push(created);
+    // Private idempotency receipt only. No Appwrite user permissions or Realtime.
+    await s.notify(sid, { roomId: id, userId: input.to, expiresAt, fingerprint });
+    if (transition) await s.updatePeer(p.$id, { state: transition.to });
+    return { accepted: true, messageId: sid };
+  }
+  async function ackIn(s, id, user, session, ids) {
+    for (const mid of ids) {
+      const m = await s.getSignal(mid);
+      if (m && (m.roomId !== id || m.to !== user || m.toSession !== session)) fail(403, 'INVALID_ACK', 'Not your message');
+      if (m) await s.deleteSignal(mid);
+    }
   }
   return {
     messages,
@@ -80,59 +130,49 @@ export function makeSignalingService(store, rooms) {
         const pid = peerId(id, input.viewerId), previous = await s.getPeer(pid);
         if (input.requestId && previous?.requestId === input.requestId && previous.hostSession === session && previous.viewerSession === viewer.sessionId) {
           if(previous.state === 'closed') fail(409,'STALE_GENERATION','Connection already closed');
-          return {generation:previous.generation,viewerId:input.viewerId};
+          return {generation:previous.generation,viewerId:input.viewerId,room:await rooms.view(s,room,user)};
         }
         if (!input.restart && previous?.state !== 'closed' && previous?.hostSession === session && previous?.viewerSession === viewer.sessionId)
-          return { generation: previous.generation, viewerId: input.viewerId };
+          return { generation: previous.generation, viewerId: input.viewerId, room: await rooms.view(s,room,user) };
         for (const m of await s.listSignals(id)) if (m.to === input.viewerId || m.from === input.viewerId) await s.deleteSignal(m.$id);
         const data = { roomId: id, hostId: user, viewerId: input.viewerId, hostSession: session, viewerSession: viewer.sessionId,
           generation: rooms.token(), requestId: input.requestId || '', state: 'authorized', expiresAt: room.expiresAt };
         if (previous) await s.updatePeer(pid, data); else await s.createPeer(pid, data);
-        return { generation: data.generation, viewerId: input.viewerId };
+        return { generation: data.generation, viewerId: input.viewerId, room: await rooms.view(s,room,user) };
       });
     },
     async send(id, user, session, input) {
       validateSignal(input);
-      return store.atomic(async s => {
-        const { room, member } = await rooms.authorize(s, id, user, session);
-        const sid = digest(`${id}:${session}:${input.messageId}`).slice(0, 32);
-        const fingerprint = digest(JSON.stringify([input.to,input.generation,input.type,input.payload]));
-        const receipt = await s.getReceipt(sid);
-        if(receipt?.fingerprint && Date.parse(receipt.expiresAt)>rooms.now()) {
-          if(receipt.fingerprint !== fingerprint) fail(409,'MESSAGE_REUSE','Message identifier reused');
-          return {accepted:true,messageId:sid}; // Completed delivery stays idempotent after ACK deletion.
+      return store.atomic(async s => sendIn(s, id, user, session, input, await rooms.authorize(s, id, user, session)));
+    },
+    async exchange(id, user, session, input) {
+      if (!object(input) || Object.keys(input).some(k => !['messages', 'acknowledgements', 'heartbeat'].includes(k)))
+        fail(400, 'INVALID_EXCHANGE', 'Unexpected coordination fields');
+      const batch = input.messages === undefined ? [] : input.messages;
+      const acks = input.acknowledgements === undefined ? [] : input.acknowledgements;
+      if (!Array.isArray(batch) || batch.length > limits.signalBatch ||
+          !Array.isArray(acks) || acks.length > limits.ackBatch ||
+          acks.some(id => typeof id !== 'string' || !idPattern.test(id)) ||
+          (input.heartbeat !== undefined && typeof input.heartbeat !== 'boolean'))
+        fail(400, 'INVALID_EXCHANGE', 'Invalid coordination batch');
+      for (let i = 0; i < batch.length; ++i) {
+        try { validateSignal(batch[i]); } catch (e) { e.messageIndex = i; throw e; }
+      }
+      if (new Set(batch.map(m => m.messageId)).size !== batch.length)
+        fail(400, 'INVALID_EXCHANGE', 'Message identifiers must be unique within a batch');
+      if (acks.length || batch.length || input.heartbeat) await store.atomic(async s => {
+        const authority = await rooms.authorize(s, id, user, session);
+        await ackIn(s, id, user, session, acks);
+        for (let i = 0; i < batch.length; ++i) {
+          try { await sendIn(s, id, user, session, batch[i], authority); }
+          catch (e) { e.messageIndex = i; throw e; }
         }
-        const p = await peer(s, room, user, input.generation);
-        const other = user === p.hostId ? p.viewerId : p.hostId;
-        if (input.to !== other) fail(403, 'INVALID_TARGET', 'Signals must go between authorized host and viewer');
-        if ((input.type === 'offer' && user !== p.hostId) || (input.type === 'answer' && user !== p.viewerId))
-          fail(403, 'HOST_ONLY', 'Viewer cannot send media offers');
-        const payload = JSON.stringify(input.payload), existing = await s.getSignal(sid);
-        if (existing) {
-          if (existing.payload !== payload || existing.type !== input.type || existing.generation !== input.generation || existing.to !== input.to)
-            fail(409, 'MESSAGE_REUSE', 'Message identifier reused');
-          return { accepted: true, messageId: sid };
-        }
-        if ((input.type === 'offer' && p.state !== 'authorized') || (input.type === 'answer' && p.state !== 'offered'))
-          fail(409, 'SIGNAL_ORDER', 'Invalid negotiation order');
-        const window = Math.floor(rooms.now() / 60000), count = member.rateWindow === window ? member.rateCount : 0;
-        if (count >= 180) fail(429, 'RATE_LIMIT', 'Too many signaling messages');
-        const queued = await s.listSignals(id);
-        for (const m of queued) if (Date.parse(m.expiresAt) <= rooms.now()) await s.deleteSignal(m.$id);
-        const outstanding = queued.filter(m => Date.parse(m.expiresAt) > rooms.now());
-        // A busy viewer cannot starve signaling for everyone else in the room.
-        if (outstanding.filter(m => m.to === input.to).length >= 48 || outstanding.length >= 256)
-          fail(429, 'INBOX_FULL', 'Peer inbox is full');
-        await s.updateMember(memberId(id, user), { rateWindow: window, rateCount: count + 1 });
-        const expiresAt = new Date(Math.min(rooms.now() + 120000, Date.parse(room.expiresAt))).toISOString();
-        await s.createSignal(sid, { roomId: id, from: user, to: input.to, generation: p.generation, type: input.type, payload,
-          toSession: user === p.hostId ? p.viewerSession : p.hostSession, expiresAt });
-        // Private idempotency receipt only. No Appwrite user permissions or Realtime.
-        await s.notify(sid, { roomId: id, userId: input.to, expiresAt, fingerprint });
-        if (input.type === 'offer' || input.type === 'answer' || input.type === 'disconnect')
-          await s.updatePeer(p.$id, { state: input.type === 'offer' ? 'offered' : input.type === 'answer' ? 'connected' : 'closed' });
-        return { accepted: true, messageId: sid };
+        if (input.heartbeat) await rooms.heartbeatIn(s, id, user, authority.room);
       });
+      // A lost response or racing snapshot is retried with the same IDs. Receipts
+      // make committed mutations idempotent even when this final read must retry.
+      return { ...(await rooms.sync(id, user, session, messages)), accepted: batch.map(m => m.messageId),
+        acknowledged: true, heartbeat: Boolean(input.heartbeat) };
     },
     async inbox(id, user, session) {
       // Read-only polls revalidate room revision and membership before responding.
@@ -140,15 +180,11 @@ export function makeSignalingService(store, rooms) {
     },
     async ack(id, user, session, input) {
       exact(input, ['messageIds']);
-      if (!Array.isArray(input.messageIds) || input.messageIds.length > 64 || input.messageIds.some(x => typeof x !== 'string' || !idPattern.test(x)))
+      if (!Array.isArray(input.messageIds) || input.messageIds.length > limits.legacyAckBatch || input.messageIds.some(x => typeof x !== 'string' || !idPattern.test(x)))
         fail(400, 'INVALID_ACK', 'Invalid acknowledgement');
       return store.atomic(async s => {
         const { room } = await rooms.authorize(s, id, user, session);
-        for (const mid of input.messageIds) {
-          const m = await s.getSignal(mid);
-          if (m && (m.roomId !== id || m.to !== user || m.toSession !== session)) fail(403, 'INVALID_ACK', 'Not your message');
-          if (m) await s.deleteSignal(mid);
-        }
+        await ackIn(s, id, user, session, input.messageIds);
         return { acknowledged: true };
       });
     },

@@ -10,8 +10,9 @@ The standalone `party` application supports host play/pause/seek/stop, optional 
 - [Windows build and remote test](docs/WINDOWS.md)
 - [Appwrite setup, schema and API](docs/APPWRITE.md)
 - [Architecture and transport evaluation](docs/ARCHITECTURE.md)
-- [Historical post-merge audit](docs/AUDIT.md)
-- [Original tests and measurements](docs/TESTS.md)
+- [v3.1 API contract, compatibility and coordination improvements](docs/PROTOCOL_V3.md)
+- [Historical post-merge audit](docs/archive/AUDIT.md)
+- [Original tests and measurements](docs/archive/TESTS.md)
 - [Streaming quality profiles, diagnostics and tuning](docs/STREAMING_TUNING.md)
 - [Integration into the existing player](docs/INTEGRATION.md)
 
@@ -35,8 +36,8 @@ On Windows, set `VCPKG_ROOT` to the directory containing
 `scripts/buildsystems/vcpkg.cmake` and install Visual Studio 2022/C++ before
 running `cmake --preset windows-msvc-release`,
 `cmake --build --preset windows-msvc-release`, and
-`ctest --preset windows-msvc-release`. The Linux sanitizer preset is tested in
-CI; the Windows preset does not claim Windows AddressSanitizer coverage.
+`ctest --preset windows-msvc-release`. PR CI runs backend and Windows checks;
+Linux validation is manual opt-in. The Windows preset does not claim Windows AddressSanitizer coverage.
 
 ## Linux quick test
 

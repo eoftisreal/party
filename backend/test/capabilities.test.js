@@ -129,5 +129,6 @@ test('combined sync shares one read-only authorization boundary and unknown room
   assert.equal(reads,2);assert.equal(transactions,0);
   const before=f.tables.Limit.size;
   for(let i=0;i<4;++i)assert.equal((await call('POST','/v1/rooms/'+key().slice(0,32)+'/join',{inviteCode:'x'.repeat(32)})).status,404);
-  assert.equal(f.tables.Limit.size,before+1); // One fixed public-join counter only.
+  assert.ok(f.tables.Limit.size > before);
+  assert.ok(f.tables.Limit.size <= before+4); // At most one of eight fixed shards per attempt; never a per-room counter.
 });

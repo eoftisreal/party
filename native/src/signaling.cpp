@@ -1,4 +1,5 @@
 #include "party/signaling.hpp"
+#include "party/protocol.hpp"
 #include <curl/curl.h>
 #include <sstream>
 #include <stdexcept>
@@ -41,7 +42,15 @@ Json http(const std::string& url, const std::string& method, const Json& data, c
     if (status < 200 || status >= 300) {
         std::string code = "HTTP_ERROR";
         if (parsed.is_object() && parsed.contains("error") && parsed["error"].is_object()) code = parsed["error"].value("code", code);
-        throw HttpError(status, code);
+        int index = -1;
+        if (parsed.is_object() && parsed.contains("error") && parsed["error"].is_object()) {
+            const auto& error = parsed["error"];
+            if (error.contains("messageIndex") && error["messageIndex"].is_number_integer()) {
+                const auto value = error["messageIndex"].get<int64_t>();
+                if (value >= 0 && value < int64_t(protocol::signalBatch)) index = int(value);
+            }
+        }
+        throw HttpError(status, code, index);
     }
     if (parsed.is_discarded()) throw std::runtime_error("Invalid API JSON");
     return parsed;
@@ -57,21 +66,30 @@ PartyApi::PartyApi() : functionUrl_(env("PARTY_FUNCTION_URL")) {
     while (functionUrl_.ends_with('/')) functionUrl_.pop_back();
 }
 Json PartyApi::request(const std::string& method, const std::string& path, const Json& data) {
-    if (!path.starts_with("/v1/rooms") || path.find_first_of("?#\r\n\t ") != std::string::npos)
+    if ((!path.starts_with("/v1/rooms") && !path.starts_with("/v3/rooms")) || path.find_first_of("?#\r\n\t ") != std::string::npos)
         throw std::invalid_argument("Invalid Party API path");
-    std::vector<std::string> headers;
+    std::vector<std::string> headers{"X-Party-Protocol: " + std::to_string(protocol::major)};
     if (!partyToken_.empty()) headers.push_back("Authorization: Bearer " + partyToken_);
     if (!sessionId.empty()) headers.push_back("X-Party-Session: " + sessionId);
     auto input = data;
-    const bool bootstrap = partyToken_.empty() && method == "POST" && (path == "/v1/rooms" || path.ends_with("/join"));
+    const bool bootstrap = partyToken_.empty() && method == "POST" && (path == "/v1/rooms" || path == "/v3/rooms" || path.ends_with("/join"));
+    auto wirePath = path;
+    if (canonical_ && wirePath.starts_with("/v1/")) wirePath.replace(0, 3, "/v3");
     if (bootstrap) input["requestKey"] = randomId() + randomId();
     Json result;
     // Retry uncertain bootstrap responses with the same private key: no duplicate members.
     for (unsigned attempt = 0;; ++attempt) {
-        try { result = http(functionUrl_ + path, method, input, headers); break; }
+        try { result = http(functionUrl_ + wirePath, method, input, headers); break; }
         catch (const HttpError& e) { if (!bootstrap || attempt == 2 || (e.status < 500 && e.code != "RETRY")) throw; }
         catch (const std::exception&) { if (!bootstrap || attempt == 2) throw; }
         std::this_thread::sleep_for(std::chrono::milliseconds(100 * (attempt + 1)));
+    }
+    if (result.contains("protocol")) {
+        const auto& metadata = result.at("protocol");
+        if (!metadata.is_object() || metadata.value("name", "") != "coin-party" ||
+            metadata.value("major", 0) != protocol::major || !metadata.contains("features") || !metadata.at("features").is_array())
+            throw std::runtime_error("Unsupported Party protocol response");
+        canonical_ = true;
     }
     if (result.contains("partyToken")) {
         const auto token = result.at("partyToken").get<std::string>();
@@ -86,9 +104,10 @@ Json PartyApi::request(const std::string& method, const std::string& path, const
     return result;
 }
 Signaling::Signaling(Request request, Json room, bool host, SignalingOptions options)
- : request_(std::move(request)), options_(options), room_(std::move(room)), host_(host) {}
+ : request_(std::move(request)), options_(options), room_(std::move(room)), host_(host) { room_.erase("inviteCode"); room_.erase("partyToken"); }
 Signaling::Signaling(std::unique_ptr<PartyApi> api, Json room, bool host) : api_(std::move(api)), room_(std::move(room)), host_(host) {
     request_=[this](const auto& method,const auto& path,const auto& data){return api_->request(method,path,data);};
+    room_.erase("inviteCode"); room_.erase("partyToken");
 }
 Signaling::~Signaling() { stop(); }
 void Signaling::connecting(bool active) { fastPollUntilUs_ = active ? nowUs() + 35000000 : 0; }
@@ -121,6 +140,15 @@ void Signaling::run(std::stop_token stop) {
     int64_t commandRetryAt=0;
     std::optional<Json> renewal;
     std::string currentSession=room_.value("sessionId","");
+    const auto metadata = room_.value("protocol", Json::object());
+    const auto features = metadata.value("features", Json::array());
+    const bool exchangeEnabled = metadata.value("major", 0) == protocol::major && features.is_array() &&
+        std::find(features.begin(), features.end(), "sync-exchange") != features.end();
+    auto removeCommand = [&](const Json& command) {
+        std::lock_guard lock(mutex_);
+        const auto it = std::find(commands_.begin(), commands_.end(), command);
+        if (it != commands_.end()) commands_.erase(it);
+    };
     auto event=[&](Json value) {
         std::lock_guard lock(mutex_);
         const auto kind=value.at("event").get<std::string>();
@@ -183,14 +211,14 @@ void Signaling::run(std::stop_token stop) {
             if(renewal){renewSession();continue;}
             refreshIce(); // Obtain ICE settings before negotiating new peers.
             const auto now=nowUs();
-            if(now-lastHeartbeat>=options_.heartbeatUs) {
+            if(!exchangeEnabled && now-lastHeartbeat>=options_.heartbeatUs) {
                 request("POST","/heartbeat"); lastHeartbeat=now; leaseRefresh=now;
                 leaseDeadlineUs_=now+options_.leaseUs*5/6; // Request start is conservative under response latency.
                 if(suspended){event({{"event","coordination-restored"}});suspended=false;}
             }
             Json acks;
             {std::lock_guard lock(mutex_);acks=delivery_.acknowledgements();}
-            if(!acks.empty() && now>=ackRetryAt) {
+            if(!exchangeEnabled && !acks.empty() && now>=ackRetryAt) {
                 try {
                     request("POST","/ack",{{"messageIds",acks}});
                     std::lock_guard lock(mutex_);delivery_.acknowledged(acks,nowUs());
@@ -200,7 +228,12 @@ void Signaling::run(std::stop_token stop) {
                 } catch(const std::exception&) {ackRetryAt=now+options_.pollUs;}
             }
             std::optional<Json> command;
-            {std::lock_guard lock(mutex_);if(!commands_.empty())command=commands_.front();}
+            {std::lock_guard lock(mutex_);
+                if (exchangeEnabled) {
+                    const auto it = std::find_if(commands_.begin(), commands_.end(), [](const Json& c){return c.at("action")=="peers";});
+                    if (it != commands_.end()) command = *it;
+                } else if(!commands_.empty()) command=commands_.front();
+            }
             if(command && now>=commandRetryAt) {
                 auto retryCommand=[&] {
                     // A full shared inbox needs the other direction to keep draining.
@@ -212,17 +245,18 @@ void Signaling::run(std::stop_token stop) {
                     auto result=request("POST","/"+command->at("action").get<std::string>(),command->at("input"));
                     if(command->at("action")=="peers") {
                         // Publish only after authority is refreshed; the application can consume events immediately.
-                        snapshot(request("GET",""));
+                        snapshot(result.contains("room") ? result.at("room") : request("GET",""));
+                        result.erase("room");
                         result["requestId"]=command->at("input").at("requestId");
                         result["event"]="authorized";event(result);
                     }
-                    std::lock_guard lock(mutex_);commands_.pop_front();
+                    removeCommand(*command);
                     commandFailures=0;commandRetryAt=0;
                 } catch(const HttpError& e) {
-                    if(e.status==401 || (e.status==403 && e.code!="REMOTE_PEER_EXPIRED") || e.status==410) throw;
+                    if(e.status==401 || (e.status==403 && e.code!="REMOTE_PEER_EXPIRED") || e.status==410 || e.status==426) throw;
                     if(e.status>=500 || e.status==429 || e.code=="RETRY") retryCommand();
                     else {
-                        {std::lock_guard lock(mutex_);commands_.pop_front();}
+                        removeCommand(*command);
                         commandFailures=0;commandRetryAt=0;
                         Json rejected={{"event","error"},{"code",e.code}};
                         if(command->at("action")=="peers") {
@@ -232,6 +266,48 @@ void Signaling::run(std::stop_token stop) {
                         event(std::move(rejected));
                     }
                 } catch(const std::exception&) {retryCommand();}
+            }
+            if (exchangeEnabled && now >= ackRetryAt) {
+                const bool pulse = now-lastHeartbeat >= options_.heartbeatUs;
+                if (acks.size() > protocol::ackBatch) acks.erase(acks.begin()+protocol::ackBatch,acks.end());
+                Json input = {{"messages",Json::array()},{"acknowledgements",acks},{"heartbeat",pulse}};
+                std::vector<Json> batch;
+                {
+                    std::lock_guard lock(mutex_);
+                    // Superseded generations cannot poison an otherwise valid batch.
+                    std::erase_if(commands_, [&](const Json& c){return c.at("action")=="signals" &&
+                        !delivery_.current({{"from",c.at("input").at("to")},{"generation",c.at("input").at("generation")},{"type",c.at("input").at("type")}});});
+                    for (const auto& c : commands_) if (c.at("action")=="signals") {
+                        input["messages"].push_back(c.at("input"));
+                        if (input.dump().size() > protocol::bodyBytes) { input["messages"].erase(input["messages"].end()-1); break; }
+                        batch.push_back(c);
+                        if (batch.size() == protocol::signalBatch) break;
+                    }
+                }
+                if (!batch.empty() || !acks.empty() || pulse) {
+                    try {
+                        const auto result = request("POST","/sync",input);
+                        const auto expected = [&] { Json ids=Json::array(); for(const auto& c:batch)ids.push_back(c.at("input").at("messageId"));return ids; }();
+                        if (result.at("accepted") != expected || !result.at("acknowledged").get<bool>() || result.at("heartbeat") != pulse)
+                            throw std::runtime_error("Invalid coordination receipt");
+                        snapshot(result.at("room"));
+                        {std::lock_guard lock(mutex_); delivery_.ingest(result.at("messages"),nowUs()); delivery_.acknowledged(acks,nowUs());}
+                        for (const auto& c:batch) removeCommand(c);
+                        if (pulse) {
+                            lastHeartbeat=now;leaseRefresh=now;leaseDeadlineUs_=now+options_.leaseUs*5/6;
+                            if(suspended){event({{"event","coordination-restored"}});suspended=false;}
+                        }
+                        ackRetryAt=0;lastPoll=now;
+                    } catch (const HttpError& e) {
+                        if(e.status==401 || (e.status==403 && (e.messageIndex<0 || e.code=="PEER_EXPIRED" ||
+                            e.code=="CREDENTIAL_REVOKED" || e.code=="STALE_SESSION" || e.code=="NOT_A_MEMBER")) || e.status==410 || e.status==426) throw;
+                        if(e.status<500 && e.status!=429 && e.code!="RETRY" && e.messageIndex>=0 && size_t(e.messageIndex)<batch.size()) {
+                            removeCommand(batch[size_t(e.messageIndex)]);
+                            event({{"event","error"},{"code",e.code}});
+                        }
+                        ackRetryAt=nowUs()+options_.pollUs;
+                    } catch (const std::exception&) { ackRetryAt=nowUs()+options_.pollUs; }
+                }
             }
             const auto pollUs = now < fastPollUntilUs_.load() ? std::min<int64_t>(options_.pollUs, 250000) : options_.pollUs;
             if(now-lastPoll>=pollUs) {
@@ -245,7 +321,7 @@ void Signaling::run(std::stop_token stop) {
             if(e.code=="PEER_EXPIRED") {
                 if(!renewal)renewal={{"previousSession",currentSession},{"requestId",randomId()}};
                 ++failures; // Retry own renewal before sending the old session header again.
-            } else if(e.status==401 || e.status==403 || e.status==404 || e.status==410) {
+            } else if(e.status==401 || e.status==403 || e.status==404 || e.status==410 || e.status==426) {
                 // In particular, STALE_SESSION is terminal: never fight another instance by rejoining.
                 terminal=true;event({{"event","closed"},{"code",e.code}});break;
             } else ++failures;

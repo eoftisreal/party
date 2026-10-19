@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { ApiError, digest } from './rooms.js';
 import { iceSettings } from './ice.js';
+import { protocol, limits, supportsVersion } from './protocol.js';
 // Participant tokens are private room capabilities. Persist only derived identities.
 const participant = token => 'g_' + digest(token).slice(0, 32);
 const issueToken = () => 'party_' + randomBytes(32).toString('hex');
@@ -13,23 +14,28 @@ function retryKey(input) {
   return input.requestKey;
 }
 function body(req) {
-  if (typeof req.bodyText === 'string' && Buffer.byteLength(req.bodyText) > 65536)
+  if (typeof req.bodyText === 'string' && Buffer.byteLength(req.bodyText) > limits.bodyBytes)
     throw new ApiError(413, 'BODY_TOO_LARGE', 'Body too large');
   let value;
   try {
     value = typeof req.bodyText === 'string' && req.bodyText.length ? JSON.parse(req.bodyText) : req.bodyJson ?? {};
     if (!value || typeof value !== 'object' || Array.isArray(value)) throw Error();
   } catch { throw new ApiError(400, 'INVALID_JSON', 'Expected JSON object'); }
-  if (Buffer.byteLength(JSON.stringify(value)) > 65536) throw new ApiError(413, 'BODY_TOO_LARGE', 'Body too large');
+  if (Buffer.byteLength(JSON.stringify(value)) > limits.bodyBytes) throw new ApiError(413, 'BODY_TOO_LARGE', 'Body too large');
   return value;
 }
 function header(req, name) { return Object.entries(req.headers || {}).find(([k]) => k.toLowerCase() === name)?.[1]; }
 export function makeHandler({ service, signaling, getIceSettings = iceSettings(), logError = () => {} }) {
   return async ({ req, res }) => {
-    const json = (value, status) => res.json(value, status, { 'cache-control': 'no-store' });
+    const json = (value, status) => res.json({ ...value, protocol }, status,
+      { 'cache-control': 'no-store', 'x-party-protocol': String(protocol.major) });
     try {
-      const path = (req.path || '/').replace(/\/$/, '') || '/', method = (req.method || '').toUpperCase();
+      const originalPath = (req.path || '/').replace(/\/$/, '') || '/';
+      const path = originalPath.replace(/^\/v3(?=\/|$)/, '/v1'), method = (req.method || '').toUpperCase();
+      if (!supportsVersion(header(req, 'x-party-protocol')))
+        throw new ApiError(426, 'PROTOCOL_VERSION_UNSUPPORTED', 'This endpoint supports Party protocol 3');
       if (path === '/health' && method === 'GET') return json({ ok: true, service: 'party-room-api', version: 3 }, 200);
+      if (path === '/v1/protocol' && method === 'GET') return json({}, 200);
       if (path !== '/v1/rooms' && !route.test(path)) throw new ApiError(404, 'NOT_FOUND', 'Route not found');
       const [, id, action] = route.exec(path) || [];
       const auth = header(req, 'authorization');
@@ -51,7 +57,7 @@ export function makeHandler({ service, signaling, getIceSettings = iceSettings()
         const token = key ? 'party_' + digest('create-token:' + key) : issueToken();
         const room = await service.create(participant(token), input, { budgetIdentity: 'public-create',
           ...(key ? { roomId: digest('create-room:' + key).slice(0, 32), inviteCode: Buffer.from(digest('create-invite:' + key), 'hex').subarray(0, 24).toString('base64url') } : {}) });
-        return json({ ...room, partyToken: token, ...settings }, 201);
+        return json({ ...room, partyToken: token, ...settings, roomExpiresAt: room.expiresAt, iceExpiresAt: settings.expiresAt }, 201);
       }
       if (id && method === 'POST' && action === 'join') {
         const input = body(req);
@@ -62,9 +68,9 @@ export function makeHandler({ service, signaling, getIceSettings = iceSettings()
           throw new ApiError(401, 'AUTH_REQUIRED', 'Existing credential required for renewal');
         if (caller) {
           if (!input.previousSession) throw new ApiError(400, 'INVALID_RENEWAL', 'Use previous session and request identifier to reconnect');
-        } else await service.limit('public-join', 'join', 300);
+        } else await service.publicLimit('join', participant(token), 300);
         const room = await service.join(id, participant(token), input.inviteCode, { ...input, bootstrapRetry: !caller && Boolean(key) });
-        return json({ ...room, partyToken: token, ...settings }, 200);
+        return json({ ...room, partyToken: token, ...settings, roomExpiresAt: room.expiresAt, iceExpiresAt: settings.expiresAt }, 200);
       }
       if (!caller) throw new ApiError(401, 'AUTH_REQUIRED', 'Party credential required');
       if (id && method === 'GET' && action === 'ice') {
@@ -79,6 +85,7 @@ export function makeHandler({ service, signaling, getIceSettings = iceSettings()
       if (id && method === 'POST') {
         const input = body(req);
         if (['leave', 'close', 'heartbeat'].includes(action)) return json(await service[action](id, caller, session), 200);
+        if (action === 'sync') return json(await signaling.exchange(id, caller, session, input), 200);
         if (action === 'revoke') {
           if (typeof input.viewerId !== 'string' || !/^g_[a-f0-9]{32}$/.test(input.viewerId)) throw new ApiError(400, 'INVALID_VIEWER', 'Invalid viewer');
           return json(await service.revokeMember(id, caller, session, input.viewerId), 200);
@@ -89,7 +96,8 @@ export function makeHandler({ service, signaling, getIceSettings = iceSettings()
       }
       throw new ApiError(405, 'METHOD_NOT_ALLOWED', 'Method not allowed');
     } catch (e) {
-      if (e instanceof ApiError) return json({ error: { code: e.code, message: e.message } }, e.status);
+      if (e instanceof ApiError) return json({ error: { code: e.code, message: e.message,
+        ...(Number.isInteger(e.messageIndex) ? { messageIndex: e.messageIndex } : {}) } }, e.status);
       logError(e);
       if (e.code === 409) return json({ error: { code: 'RETRY', message: 'Concurrent update; retry request' } }, 409);
       return json({ error: { code: 'INTERNAL_ERROR', message: 'Request failed' } }, 500);

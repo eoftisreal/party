@@ -14,6 +14,8 @@ node tools/setup.js
 
 Setup adds optional `members.revoked` (string8, default empty), retains collections/data, checks attribute compatibility and waits for indexes. It never deletes a database. Setup keys need collection/attribute/index administration scopes; never put one in the player.
 
+For the additive v3.1 upgrade, run setup before deploying: it also creates/checks the recipient/session/expiry inbox and scheduled cleanup indexes listed in [PROTOCOL_V3.md](PROTOCOL_V3.md). Ship `backend/protocol/v3.json` alongside `src`. Cleanup is bounded and may require repeated scheduled invocations to drain a backlog. Existing account-free Coin clients remain compatible; the maintenance-window requirement below applies to older account-based deployments.
+
 Collections use empty collection permissions and document security. New rooms, memberships, peers, signals, receipts and limits have empty document permissions. Old account-readable notifications are not used; audit them and let cleanup expire them.
 
 ## Function
