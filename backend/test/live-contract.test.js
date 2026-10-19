@@ -25,7 +25,6 @@ async function execution({ failAt, code = 400, type = 'document_invalid_structur
   Client.prototype.call = async function(method, url, headers, payload) {
     const path = url.pathname;
     calls.push({method,path,payload});
-    if (path === '/v1/account') return {$id:'host'};
     if (path === '/v1/databases/transactions') {
       if (failAt === 'transactions.create') throw failure();
       if (payload.ttl < 60 || payload.ttl > 3600) throw new AppwriteException('Invalid ttl',400,'general_argument_invalid');

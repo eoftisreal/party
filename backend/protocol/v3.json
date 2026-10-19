@@ -1,0 +1,88 @@
+{
+  "name": "coin-party",
+  "major": 3,
+  "minor": 1,
+  "canonicalPrefix": "/v3",
+  "compatiblePrefixes": ["/v1", "/v3"],
+  "versionHeader": "X-Party-Protocol",
+  "features": ["sync-exchange", "peer-snapshot"],
+  "limits": {
+    "bodyBytes": 65536,
+    "signalBatch": 8,
+    "ackBatch": 32,
+    "legacyAckBatch": 64,
+    "inboxBatch": 64,
+    "memberRecords": 128,
+    "cleanupRooms": 32,
+    "cleanupWrites": 48,
+    "cleanupExpired": 64,
+    "publicBudgetShards": 8
+  },
+  "authentication": {
+    "public": ["GET /health", "GET /v3/protocol", "POST /v3/rooms", "POST /v3/rooms/{roomId}/join"],
+    "privateHeaders": ["Authorization: Bearer party_<64 lowercase hex>", "X-Party-Session: <32 lowercase hex>"],
+    "renewal": "POST join requires existing bearer, previousSession and stable requestId; the previous session header may be expired",
+    "bootstrap": "requestKey is an optional private CSPRNG 256-bit retry secret, never a public request identifier"
+  },
+  "endpoints": {
+    "GET /health": {"response": "health"},
+    "GET /v3/protocol": {"response": "protocol"},
+    "POST /v3/rooms": {"request": "create", "response": "createdRoom", "status": 201},
+    "POST /v3/rooms/{roomId}/join": {"request": "joinOrRenew", "response": "joinedRoom"},
+    "GET /v3/rooms/{roomId}": {"response": "room"},
+    "GET /v3/rooms/{roomId}/ice": {"response": "ice"},
+    "GET /v3/rooms/{roomId}/sync": {"response": "sync"},
+    "POST /v3/rooms/{roomId}/sync": {"request": "exchange", "response": "exchangeResult"},
+    "POST /v3/rooms/{roomId}/peers": {"request": "authorize", "response": "authorization", "role": "host"},
+    "POST /v3/rooms/{roomId}/signals": {"request": "signal", "response": "accepted", "status": 202},
+    "GET /v3/rooms/{roomId}/signals": {"response": "inbox"},
+    "POST /v3/rooms/{roomId}/ack": {"request": "ack", "response": "acknowledged"},
+    "POST /v3/rooms/{roomId}/heartbeat": {"response": "heartbeat"},
+    "POST /v3/rooms/{roomId}/revoke": {"request": "revoke", "response": "revoked", "role": "host"},
+    "POST /v3/rooms/{roomId}/leave": {"response": "left"},
+    "POST /v3/rooms/{roomId}/close": {"response": "closed", "role": "host"}
+  },
+  "payloads": {
+    "create": {"optional": {"title": "nonempty string <=80", "requestKey": "hex64 secret"}},
+    "joinOrRenew": {"firstJoin": {"inviteCode": "base64url32 secret", "requestKey": "optional hex64 secret"}, "renew": {"previousSession": "hex32", "requestId": "hex32"}},
+    "authorize": {"required": {"viewerId": "participant ID"}, "optional": {"restart": "boolean", "requestId": "hex32"}},
+    "signal": {"required": {"messageId": "hex32 stable across retries", "to": "authorized counterpart ID", "generation": "hex32", "type": "offer|answer|candidate|disconnect", "payload": "signal payload"}},
+    "signalPayloads": {"offer": {"sdp": "encrypted host-send H264/Opus SDP <=60000 chars"}, "answer": {"sdp": "encrypted viewer-receive H264/Opus SDP <=60000 chars"}, "candidate": {"candidate": "direct host/srflx/prflx candidate <=2048 chars", "mid": "1..32 alphanumeric/_/-"}, "disconnect": {}},
+    "ack": {"required": {"messageIds": "array of <=64 hex32 IDs owned by caller's current session"}},
+    "exchange": {"optional": {"messages": "array of <=8 signals", "acknowledgements": "array of <=32 hex32 IDs", "heartbeat": "boolean"}},
+    "revoke": {"required": {"viewerId": "participant ID"}},
+    "room": {"required": ["roomId", "title", "hostId", "status", "expiresAt", "maxViewers", "participants", "yourUserId", "yourRole", "serverTimeMs"], "optional": ["connections", "connection", "sessionId"], "privacy": "host sees all connections and session-version hashes; viewer sees only its connection"},
+    "createdRoom": {"extends": "room", "additional": ["partyToken", "inviteCode", "sessionId", "iceServers", "ttlSeconds", "expiresAt", "turnConfigured", "roomExpiresAt", "iceExpiresAt"], "expiry": "Bootstrap expiresAt retains legacy numeric ICE Unix seconds; iceExpiresAt repeats it. roomExpiresAt is ISO8601 room expiry. Normal room snapshots keep ISO8601 expiresAt."},
+    "joinedRoom": {"extends": "createdRoom", "omit": ["inviteCode"]},
+    "authorization": {"required": ["generation", "viewerId"], "optional": ["room"]},
+    "inbox": {"required": ["messages", "serverTimeMs"], "message": ["messageId", "from", "generation", "type", "payload"], "maximum": 64},
+    "sync": {"extends": "inbox", "additional": ["room"]},
+    "exchangeResult": {"extends": "sync", "additional": ["accepted", "acknowledged", "heartbeat"], "accepted": "input message IDs in order; duplicates keep IDs", "heartbeat": "whether a requested heartbeat committed"},
+    "ice": {"required": ["iceServers", "ttlSeconds", "expiresAt", "turnConfigured"], "policy": "direct-only STUN; turnConfigured is false"},
+    "accepted": {"required": ["accepted", "messageId"]},
+    "acknowledged": {"required": ["acknowledged"]},
+    "heartbeat": {"required": ["ok", "serverTimeMs"]},
+    "left": {"required": ["left", "roomClosed"]},
+    "closed": {"required": ["closed"]},
+    "revoked": {"required": ["revoked"]},
+    "health": {"required": ["ok", "service", "version"]},
+    "protocol": {"required": ["protocol"]},
+    "error": {"required": ["error"], "error": {"required": ["code", "message"], "optional": {"messageIndex": "0-based failed exchange message; no secrets"}}}
+  },
+  "signaling": {
+    "states": ["authorized", "offered", "connected", "closed"],
+    "transitions": {"offer": {"from": "authorized", "to": "offered", "role": "host"}, "answer": {"from": "offered", "to": "connected", "role": "viewer"}, "disconnect": {"to": "closed", "role": "either"}},
+    "reliability": "stable message IDs and fingerprints; receipt survives ACK deletion until TTL; ACK only after application; fresh generation on peer replacement; all operations reauthorize membership/session",
+    "exchangeAtomicity": "ACKs, messages in input order and optional heartbeat commit together; response snapshot is revalidated after commit. Uncertain response retries preserve IDs. Empty exchange is read-only."
+  },
+  "errors": [
+    "AUTH_REQUIRED", "BODY_TOO_LARGE", "CREDENTIAL_NOT_REQUIRED", "CREDENTIAL_REVOKED", "EVENT_QUEUE_FULL", "HOST_ONLY", "ICE_CONFIGURATION_ERROR", "INBOX_FULL", "INTERNAL_ERROR", "INVALID_ACK", "INVALID_EXCHANGE", "INVALID_ICE", "INVALID_INVITE", "INVALID_JSON", "INVALID_PEER", "INVALID_RENEWAL", "INVALID_REQUEST_KEY", "INVALID_ROOM_ID", "INVALID_SDP", "INVALID_SIGNAL", "INVALID_TARGET", "INVALID_TITLE", "INVALID_TOKEN", "INVALID_VIEWER", "LEASE_ACTIVE", "MESSAGE_REUSE", "METHOD_NOT_ALLOWED", "NOT_A_MEMBER", "NOT_FOUND", "PEER_EXPIRED", "PROTOCOL_VERSION_UNSUPPORTED", "RATE_LIMIT", "REMOTE_PEER_EXPIRED", "REQUEST_REUSE", "RETRY", "ROOM_CLOSED", "ROOM_FULL", "ROOM_MEMBERSHIP_LIMIT", "ROOM_NOT_FOUND", "SERVICE_UNAVAILABLE", "SIGNAL_ORDER", "STALE_GENERATION", "STALE_SESSION"
+  ],
+  "compatibility": {
+    "existingCoin": "Existing account-free v3 clients using /v1 paths and no version header retain original payloads and GET sync/POST ack/POST signals behavior. /v1 is a transport alias, not support for account-based protocol v1 or v2.",
+    "negotiation": "Responses advertise protocol major/minor/features. New Coin clients request X-Party-Protocol: 3 on their normal bootstrap; no separate discovery request is required. Missing metadata on an older v3 server means legacy v3 features only.",
+    "minor": "Additive optional fields, endpoints and features only. Clients ignore unknown optional fields and use only advertised features. Existing field types, roles, errors and session semantics remain stable.",
+    "major": "A breaking change requires a new prefix and explicit opt-in. Unsupported explicit major is rejected with HTTP 426 before any mutation. Never silently reinterpret a Coin request.",
+    "deprecation": "Removing the /v1 alias or a v3 feature requires a documented announced release and a supported Coin migration; no removal in v3.1."
+  }
+}

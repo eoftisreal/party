@@ -1,5 +1,7 @@
 # Account-free, single-endpoint protocol (v3)
 
+Current additive version: **v3.1**. See [the version and exchange guide](PROTOCOL_V3.md) and [authoritative JSON contract](../backend/protocol/v3.json). Canonical `/v3` paths and existing `/v1` aliases have the same account-free authorization. Existing Coin requests remain compatible.
+
 The client embeds `https://party.sgp.appwrite.run` as its default. The sole coordination override is `PARTY_FUNCTION_URL` (for staging/tests).
 Appwrite endpoint, project, `party-v2`, collections and scoped runtime key stay on the Function.
 No Accounts API, Appwrite session/JWT, global client API key, guest bootstrap or Realtime subscription exists in this protocol.
@@ -24,9 +26,10 @@ All room reads require the current session, not just a bearer token. All respons
 | --- | --- | --- |
 | (none) | GET | Membership and visible connection snapshot |
 | `/sync` | GET | Snapshot plus private inbox in one revalidated read; zero transactions/writes |
+| `/sync` | POST | Advertised `sync-exchange`: up to 8 messages, 32 applied ACKs and heartbeat together, then revalidated snapshot/inbox |
 | `/ice` | GET | Current public STUN settings for a live member |
 | `/heartbeat` | POST | Refresh own membership; host also extends room expiry |
-| `/peers` | POST | Host authorizes/restarts a single viewer generation; stable requestId makes retries idempotent |
+| `/peers` | POST | Host authorizes/restarts a single viewer generation; stable requestId makes retries idempotent; includes room snapshot |
 | `/signals` | POST / GET | Authorized host offer / viewer answer / trickled direct ICE / disconnect, or own session inbox |
 | `/ack` | POST | Acknowledge successfully applied messages only; receipt survives deletion for response-loss retry |
 | `/revoke` | POST | Host only, body `{ "viewerId": "..." }`; closes that viewer's peers and tombstones credential |
@@ -44,6 +47,10 @@ At 100 seconds without a confirmed heartbeat, cooperating native clients suspend
 Default durable budgets: service-wide 120 starts/hour, 300 public join attempts/minute, 30 join/renewal attempts/minute/room (including incorrect invitations), 180 new signaling messages/minute/member, bounded per-recipient/room inboxes, and 64 KiB request bodies. Fresh identities cannot bypass shared public limits. Limits are stored in existing `limits`; do not disable the create budget on a public service. The shared budget also means an attacker can exhaust service availability: this is *not* a complete volumetric DDoS defense. Configure platform/edge request and concurrency limits before public launch. Do not trust client-supplied forwarded-IP/user headers as an abuse identity. Read polling has no per-member durable rate counter to avoid adding a transaction per poll; edge throttling must cover it. No claim of official-player-only enforcement is made.
 
 ## Deployment / migration (explicit operator action)
+
+For an **existing account-free v3 deployment**, v3.1 is additive. Follow [the index-first rollout](PROTOCOL_V3.md#rollout-and-verification); existing requests remain supported. Scheduled cleanup now runs in bounded batches; monitor backlog and invoke repeatedly as needed. Public budgets use fixed shards without increasing the total cap. Rooms retain at most 128 identities including revoked tombstones.
+
+The following steps describe the earlier **account-based v2 to account-free v3** migration:
 
 This is a breaking coordination protocol. Do not silently deploy it over active legacy sessions.
 

@@ -7,6 +7,11 @@ export const schema = {
   limits:{revision:'integer',createWindow:'integer',createCount:'integer',joinWindow:'integer',joinCount:'integer'},
   notifications:{fingerprint:{size:64,xdefault:''},roomId:32,userId:36,expiresAt:'datetime'}
 };
+export const coordinationIndexes = {
+  rooms: { cleanup: ['status', 'expiresAt'] },
+  signals: { inbox: ['roomId', 'to', 'toSession', 'expiresAt'], expiry: ['expiresAt'] },
+  notifications: { expiry: ['expiresAt'] },
+};
 export function validateAttribute(name, definition, attribute) {
   const type = typeof definition==='number' || typeof definition==='object' ? 'string' : definition;
   const size = typeof definition==='object' ? definition.size : definition;

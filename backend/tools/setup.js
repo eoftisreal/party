@@ -1,6 +1,6 @@
-// Creates a fresh schema. Does not delete databases, collections, or user data.
+// Adds/checks the schema in an existing database. Never deletes user data.
 import {Client,Databases} from 'node-appwrite';
-import {schema,validateAttribute} from '../src/schema.js';
+import {schema,validateAttribute,coordinationIndexes} from '../src/schema.js';
 const endpoint=process.env.APPWRITE_ENDPOINT,project=process.env.APPWRITE_PROJECT_ID,key=process.env.PARTY_SETUP_API_KEY;
 const databaseId=process.env.PARTY_DATABASE_ID||'party-v2';
 if(!endpoint||!project||!key)throw Error('Set APPWRITE_ENDPOINT, APPWRITE_PROJECT_ID and PARTY_SETUP_API_KEY');
@@ -40,6 +40,19 @@ for(const [name,attributes]of Object.entries(schema)){
       await new Promise(resolve=>setTimeout(resolve,1000));
     }
     if(!ready)throw Error(`Index pending on ${name}; retry setup`);
+  }
+  for (const [indexKey, indexAttributes] of Object.entries(coordinationIndexes[name] || {})) {
+    try { await db.createIndex({databaseId,collectionId,key:indexKey,type:'key',attributes:indexAttributes}); }
+    catch(e) { if(e.code!==409)throw e; }
+    let available=false;
+    for(let attempt=0;attempt<60;++attempt) {
+      const index=await db.getIndex({databaseId,collectionId,key:indexKey});
+      if(index.type!=='key'||JSON.stringify(index.attributes)!==JSON.stringify(indexAttributes))throw Error(`Incompatible index on ${name}.${indexKey}`);
+      if(index.status==='failed')throw Error(`Index failed on ${name}.${indexKey}`);
+      if(index.status==='available'){available=true;break;}
+      await new Promise(resolve=>setTimeout(resolve,1000));
+    }
+    if(!available)throw Error(`Index pending on ${name}.${indexKey}; retry setup`);
   }
   console.log(`Configured ${collectionId}`);
 }

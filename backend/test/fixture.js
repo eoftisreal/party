@@ -24,6 +24,7 @@ export function fixture(options = {}) {
     store.listNotifications = async () => [...t.Notification.values()].map(x=>structuredClone(x));
     store.bumpRoom = async id => {
       const room = await store.getRoom(id);
+      if (!room) throw Object.assign(Error('missing'), {code:404});
       return store.updateRoom(id,{revision:room.revision+1});
     };
     store.getReceipt = store.getNotification;

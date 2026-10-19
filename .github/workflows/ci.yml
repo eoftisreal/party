@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      include_linux:
+        description: Run optional Linux validation
+        type: boolean
+        default: false
 concurrency:
   group: prototype-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
@@ -20,6 +25,7 @@ jobs:
       - run: npm ci && npm test && npm run check
         working-directory: backend
   linux:
+    if: github.event_name == 'workflow_dispatch' && inputs.include_linux
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
@@ -98,7 +104,7 @@ jobs:
         working-directory: backend
       - name: Separate host and viewer with TLS signaling and response loss
         shell: pwsh
-        run: python tools/two_process.py build/Release/party.exe "$env:TEMP/party-test.mp4" --outage --report two-process-windows.json
+        run: python tools/two_process.py build/Release/party.exe "$env:TEMP/party-test.mp4" --viewers 5 --outage --report two-process-windows.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:

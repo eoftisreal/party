@@ -9,11 +9,10 @@ const types = new Set([
   'document_invalid_structure', 'document_already_exists', 'document_update_conflict',
   'transaction_not_found', 'transaction_not_ready', 'transaction_expired',
   'transaction_invalid', 'transaction_conflict', 'transaction_limit_exceeded',
-  'user_jwt_invalid', 'user_session_not_found', 'user_unauthorized',
 ]);
 const collections = new Set(['rooms', 'members', 'peers', 'signals', 'notifications', 'limits']);
 function validOperation(operation) {
-  if (['transactions.create', 'transactions.commit', 'transactions.rollback', 'account.get', 'configuration.load', 'request.process'].includes(operation)) return true;
+  if (['transactions.create', 'transactions.commit', 'transactions.rollback', 'configuration.load', 'request.process'].includes(operation)) return true;
   const [action, collection] = operation.split(':');
   return ['documents.get', 'documents.create', 'documents.update', 'documents.delete', 'documents.list'].includes(action) && collections.has(collection);
 }

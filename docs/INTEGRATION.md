@@ -1,5 +1,7 @@
 # Integration with the existing C++20 player
 
+See [the v3.1 contract and compatibility policy](PROTOCOL_V3.md). `PartyApi` sends the version header on bootstrap, adopts canonical `/v3` paths when metadata is advertised, and retains `/v1` for older account-free backends. `Signaling` uses batched exchange and bundled authorization snapshots when supported; it falls back to existing v3 requests automatically. Public worker events strip invitation and capability secrets.
+
 `party_core` separates four areas:
 
 | Component | Interface | Integration point |

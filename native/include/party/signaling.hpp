@@ -9,9 +9,10 @@
 namespace party {
 class HttpError final : public std::runtime_error {
 public:
-    HttpError(long status, std::string code) : std::runtime_error(code), status(status), code(std::move(code)) {}
+    HttpError(long status, std::string code, int messageIndex = -1) : std::runtime_error(code), status(status), code(std::move(code)), messageIndex(messageIndex) {}
     long status;
     std::string code;
+    int messageIndex;
 };
 class PartyApi {
 public:
@@ -20,6 +21,7 @@ public:
     std::string sessionId, roomId;
 private:
     std::string functionUrl_, partyToken_;
+    bool canonical_ = false;
 };
 // All HTTP work happens on one worker. The render/network-pacer thread never blocks on Functions.
 struct SignalingOptions { int64_t pollUs=2000000, heartbeatUs=10000000, leaseUs=120000000, recoveryUs=1800000000; };

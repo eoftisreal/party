@@ -1,0 +1,10 @@
+#pragma once
+#include <cstddef>
+// Generated from backend/protocol/v3.json by CMake. Do not duplicate wire limits.
+namespace party::protocol {
+inline constexpr int major = @PARTY_PROTOCOL_major@;
+inline constexpr int minor = @PARTY_PROTOCOL_minor@;
+inline constexpr std::size_t bodyBytes = @PARTY_PROTOCOL_bodyBytes@;
+inline constexpr std::size_t signalBatch = @PARTY_PROTOCOL_signalBatch@;
+inline constexpr std::size_t ackBatch = @PARTY_PROTOCOL_ackBatch@;
+}

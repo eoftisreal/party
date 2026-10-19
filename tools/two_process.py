@@ -146,6 +146,7 @@ with tempfile.TemporaryDirectory(prefix='party-processes-') as temporary:
         server.terminate();server.wait(timeout=5)
         assert counts.get('signalResponseDropped')==1 and counts.get('ackResponseDropped')==1,'Lost-response scenarios not exercised'
         assert counts.get('startResponseDropped')==1 and counts.get('joinResponseDropped')==1,'Bootstrap retries not exercised'
+        assert counts.get('syncResponseDropped')==1 and counts.get('exchangeMessages',0)>0 and counts.get('exchangeAcks',0)>0,'Batched signaling retries and ACKs not exercised'
         assert counts['accountRequests']==0 and counts['guestRequests']==0,'Removed authentication endpoint was contacted'
         assert counts['statuses'].get('POST peers 200 ',0)<=32,'Connection recovery entered an authorization restart storm'
         report['fixtureCounters']=counts;report['passed']=True
