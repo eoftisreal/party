@@ -27,8 +27,12 @@ function body(req) {
 function header(req, name) { return Object.entries(req.headers || {}).find(([k]) => k.toLowerCase() === name)?.[1]; }
 export function makeHandler({ service, signaling, getIceSettings = iceSettings(), logError = () => {} }) {
   return async ({ req, res }) => {
-    const json = (value, status) => res.json({ ...value, protocol }, status,
-      { 'cache-control': 'no-store', 'x-party-protocol': String(protocol.major) });
+    let stage = 'request.route';
+    const json = (value, status) => {
+      stage = 'request.response';
+      return res.json({ ...value, protocol }, status,
+        { 'cache-control': 'no-store', 'x-party-protocol': String(protocol.major) });
+    };
     try {
       const originalPath = (req.path || '/').replace(/\/$/, '') || '/';
       const path = originalPath.replace(/^\/v3(?=\/|$)/, '/v1'), method = (req.method || '').toUpperCase();
@@ -52,16 +56,22 @@ export function makeHandler({ service, signaling, getIceSettings = iceSettings()
       // First-time creation and invitation entry have no account/token bootstrap request.
       if (path === '/v1/rooms' && method === 'POST') {
         if (caller) throw new ApiError(400, 'CREDENTIAL_NOT_REQUIRED', 'Start a new party without an existing credential');
+        stage = 'request.body';
         const input = body(req), key = retryKey(input);
+        stage = 'request.ice';
         const settings = getIceSettings(); // Reject bad deployment configuration before creating state.
+        stage = 'request.create';
         const token = key ? 'party_' + digest('create-token:' + key) : issueToken();
         const room = await service.create(participant(token), input, { budgetIdentity: 'public-create',
           ...(key ? { roomId: digest('create-room:' + key).slice(0, 32), inviteCode: Buffer.from(digest('create-invite:' + key), 'hex').subarray(0, 24).toString('base64url') } : {}) });
         return json({ ...room, partyToken: token, ...settings, roomExpiresAt: room.expiresAt, iceExpiresAt: settings.expiresAt }, 201);
       }
       if (id && method === 'POST' && action === 'join') {
+        stage = 'request.body';
         const input = body(req);
+        stage = 'request.ice';
         const settings = getIceSettings();
+        stage = 'request.join';
         const key = retryKey(input);
         const token = caller ? match[1] : key ? 'party_' + digest(`join-token:${id}:${key}`) : issueToken();
         if (!caller && (input.previousSession !== undefined || input.requestId !== undefined))
@@ -83,6 +93,7 @@ export function makeHandler({ service, signaling, getIceSettings = iceSettings()
       if (id && method === 'GET' && action === 'signals') return json(await signaling.inbox(id, caller, session), 200);
       if (id && method === 'GET' && action === 'sync') return json(await service.sync(id, caller, session, signaling.messages), 200);
       if (id && method === 'POST') {
+        stage = 'request.body';
         const input = body(req);
         if (['leave', 'close', 'heartbeat'].includes(action)) return json(await service[action](id, caller, session), 200);
         if (action === 'sync') return json(await signaling.exchange(id, caller, session, input), 200);
@@ -98,7 +109,7 @@ export function makeHandler({ service, signaling, getIceSettings = iceSettings()
     } catch (e) {
       if (e instanceof ApiError) return json({ error: { code: e.code, message: e.message,
         ...(Number.isInteger(e.messageIndex) ? { messageIndex: e.messageIndex } : {}) } }, e.status);
-      logError(e);
+      logError(e, stage);
       if (e.code === 409) return json({ error: { code: 'RETRY', message: 'Concurrent update; retry request' } }, 409);
       return json({ error: { code: 'INTERNAL_ERROR', message: 'Request failed' } }, 500);
     }
