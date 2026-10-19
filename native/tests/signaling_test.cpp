@@ -198,6 +198,49 @@ int main(){using namespace party;try{
     expect(firstAction.ends_with("/peers"),"Negotiation did not take priority over coordination");
     expect(batchRetried && firstBatch.size()==2 && exchangeAcks>0 && applications==1,"Exchange response loss broke reliable batching");
     expect(legacyWrites==0 && extraReads==0,"Exchange used redundant heartbeat, ACK or authorization snapshot requests");
+    for(const auto status:{429L,503L,409L,0L}) {
+        std::atomic<unsigned> drained{0},sent{0},attempts{0};Json original;
+        Json viewerRoom=room;viewerRoom["protocol"]=v3Room.at("protocol");
+        Signaling fullExchange([&](const std::string& method,const std::string& path,const Json& input)->Json {
+            if(!path.ends_with("/sync"))return viewerRoom;
+            Json result={{"room",viewerRoom},{"messages",drained?Json::array():Json::array({message('6')})}};
+            if(method=="POST") {
+                if(!input.at("messages").empty()) {
+                    ++attempts;
+                    if(original.is_null())original=input.at("messages");
+                    else expect(original==input.at("messages"),"Congestion retry changed messages");
+                    if(!drained) {
+                        if(status==0)throw std::runtime_error("Lost exchange response");
+                        throw HttpError(status,status==429?"INBOX_FULL":status==409?"RETRY":"UNAVAILABLE");
+                    }
+                    ++sent;
+                }
+                drained+=unsigned(input.at("acknowledgements").size());
+                Json accepted=Json::array();for(const auto& m:input.at("messages"))accepted.push_back(m.at("messageId"));
+                result["accepted"]=accepted;result["acknowledged"]=true;result["heartbeat"]=input.at("heartbeat");
+            }
+            return result;
+        },viewerRoom,false,{20000,20000,2000000,4000000});
+        fullExchange.send("host",id('a'),{{"type","candidate"}});fullExchange.start();
+        const auto deadline=nowUs()+3000000;unsigned applied=0;
+        while(nowUs()<deadline && !sent) {
+            for(const auto& e:fullExchange.events())if(e.at("event")=="signal") {++applied;fullExchange.processed(e.at("messageId"),true);}
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        fullExchange.stop();
+        expect(sent==1 && drained>0 && attempts==2 && applied==1,"Exchange retries starved independent ACKs or heartbeat");
+    }
+    std::atomic<unsigned> v3Joins{0};
+    Signaling v3Expired([&](const std::string& method,const std::string& path,const Json& input)->Json {
+        if(path.ends_with("/join")){++v3Joins;return v3Room;}
+        if(path.ends_with("/sync")) {
+            if(method=="POST")throw HttpError(403,"PEER_EXPIRED",0);
+            return {{"room",v3Room},{"messages",Json::array()}};
+        }
+        return v3Room;
+    },v3Room,true,{20000,20000,2000000,4000000});
+    v3Expired.start();until(v3Expired,[](const Json& e){return e.at("event")=="rejoined";});v3Expired.stop();
+    expect(v3Joins>0,"Exchange lease failure did not renew the session");
     std::atomic<unsigned> setupPolls{0};
     Signaling fast([&](const std::string&,const std::string& path,const Json&)->Json {
         if(path.ends_with("/sync")) { ++setupPolls; return {{"room",room},{"messages",Json::array()}}; }

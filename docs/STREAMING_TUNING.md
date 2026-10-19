@@ -120,11 +120,15 @@ The real RTP loopback test can exercise host-negotiated high quality:
 PARTY_TEST_HIGH_QUALITY=1 python3 tools/run_loopback.py build/linux-release/party_loopback /tmp/party-test.mp4 --window
 ```
 
-CI also runs this high-quality scenario with ASan/UBSan, plus the existing normal,
-impaired, seek/reconnect and separate-process TLS scenarios. Real Internet and
-hardware encoder acceptance must be run on the target devices.
+The optional manual Linux workflow runs this high-quality scenario with
+ASan/UBSan. PR CI runs Windows normal/impaired loopback and five-viewer TLS
+outage scenarios. Real Internet and hardware encoder acceptance must be run on
+the target devices.
 
 ### Local verification, 2026-10-15
+
+Historical pre-v3 results below retain their original authentication details.
+Use current PR checks and [PROTOCOL_V3.md](PROTOCOL_V3.md) for the current protocol.
 
 | Check | Result |
 | --- | --- |

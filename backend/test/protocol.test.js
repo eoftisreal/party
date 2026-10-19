@@ -93,6 +93,16 @@ test('per-member signaling budget counts every new message in a batch and rolls 
   await f.exchange('host',{messages:[f.signal()]});assert.equal(f.ms.get(mid).rateCount,180);
   await assert.rejects(f.exchange('host',{messages:[f.signal()]}),rejected('RATE_LIMIT'));
 });
+test('closed generation queues do not starve a replacement viewer before TTL cleanup',async()=>{
+  const f=await setup();
+  for(let i=0;i<256;++i)await f.store.createSignal(id(),{roomId:f.r.roomId,generation:f.p.generation,to:'viewer',expiresAt:new Date(f.rooms.now()+120000).toISOString()});
+  await f.rooms.revokeMember(f.r.roomId,'host',f.r.sessionId,'viewer');
+  const next=await f.rooms.join(f.r.roomId,'replacement',f.r.inviteCode);
+  const peer=await f.signaling.connect(f.r.roomId,'host',f.r.sessionId,{viewerId:'replacement'});
+  await f.exchange('host',{messages:[{...f.signal('offer','replacement'),generation:peer.generation}]});
+  assert.equal((await f.signaling.inbox(f.r.roomId,'replacement',next.sessionId)).messages.length,1);
+  await assert.rejects(f.exchange('viewer',{}),rejected('CREDENTIAL_REVOKED'));
+});
 test('sharded public budgets keep an exact service-wide ceiling with fixed storage and refill',async()=>{
   const f=fixture(),maximum=19;
   const results=await Promise.allSettled(Array.from({length:30},(_,i)=>f.rooms.publicLimit('create','identity-'+i,maximum)));
@@ -123,4 +133,14 @@ test('room identity tombstone cap bounds repeated admission without reviving rev
   for(let i=1;i<limits.memberRecords;++i)await f.store.createMember('old-'+i,{roomId:room.roomId,userId:'old-'+i,revoked:'yes'});
   await assert.rejects(f.rooms.join(room.roomId,'new-viewer',room.inviteCode),rejected('ROOM_MEMBERSHIP_LIMIT'));
   assert.equal((await f.rooms.read(room.roomId,'host',room.sessionId)).participants.length,1);
+});
+test('cleanup tolerates another scheduled worker removing a candidate before its transaction',async()=>{
+  const f=fixture(),first=await f.rooms.create('host-one'),second=await f.rooms.create('host-two');
+  f.advance(1800001);
+  const atomic=f.store.atomic;let raced=false;
+  f.store.atomic=work=>{
+    if(!raced){raced=true;f.rs.delete(first.roomId);f.ms.delete(memberId(first.roomId,'host-one'));}
+    return atomic(work);
+  };
+  await f.rooms.cleanup();assert.equal(f.rs.get(second.roomId).status,'closed');
 });

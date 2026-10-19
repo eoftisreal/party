@@ -93,7 +93,8 @@ export function makeSignalingService(store, rooms) {
     const window = Math.floor(rooms.now() / 60000), count = member.rateWindow === window ? member.rateCount : 0;
     if (count >= 180) fail(429, 'RATE_LIMIT', 'Too many signaling messages');
     const queued = authority.queued ??= await s.listSignals(id);
-    const outstanding = queued.filter(m => Date.parse(m.expiresAt) > rooms.now());
+    const generations = authority.generations ??= new Set((await s.listPeers(id)).filter(p => p.state !== 'closed').map(p => p.generation));
+    const outstanding = queued.filter(m => Date.parse(m.expiresAt) > rooms.now() && generations.has(m.generation));
     // A busy viewer cannot starve signaling for everyone else in the room.
     if (outstanding.filter(m => m.to === input.to).length >= 48 || outstanding.length >= 256)
       fail(429, 'INBOX_FULL', 'Peer inbox is full');

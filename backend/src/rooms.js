@@ -245,7 +245,7 @@ export function makeRoomsService(store, { now = () => Date.now(), random = rando
           // Closing the room invalidates every credential immediately. Queue
           // deletion belongs to bounded GC, not this authorization transaction.
           await s.updateRoom(r.$id, { status: 'closed', revision: (fresh.revision || 0) + 1 });
-        });
+        }).catch(e => { if (e.code !== 'ROOM_NOT_FOUND') throw e; });
       }
       // Closed rooms are retained until one day after their original expiry for diagnostics.
       // Drain dependencies in bounded transactions; retain the room fence until
@@ -267,7 +267,7 @@ export function makeRoomsService(store, { now = () => Date.now(), random = rando
             if (await s.getLimit(budget)) await s.deleteLimit(budget);
           }
           await s.deleteRoom(r.$id);
-        });
+        }).catch(e => { if (e.code !== 'ROOM_NOT_FOUND') throw e; });
       }
       const expiredSignals = store.listExpiredSignals ? await store.listExpiredSignals(timestamp()) :
         (await Promise.all((await store.listRooms()).map(r => store.listSignals(r.$id)))).flat().filter(m => Date.parse(m.expiresAt) <= now()).slice(0, limits.cleanupExpired);

@@ -114,6 +114,8 @@ void Signaling::connecting(bool active) { fastPollUntilUs_ = active ? nowUs() + 
 void Signaling::start() { connecting(true); if(worker_.joinable()) throw std::logic_error("Signaling already started"); leaseDeadlineUs_=nowUs()+options_.leaseUs*5/6; worker_ = std::jthread([this](std::stop_token token) { run(token); }); }
 void Signaling::send(const std::string& to, const std::string& generation, const Json& message) {
     Json input = message; input["to"] = to; input["generation"] = generation; input["messageId"] = randomId();
+    if (Json{{"messages",Json::array({input})},{"acknowledgements",Json::array()},{"heartbeat",false}}.dump().size() > protocol::bodyBytes)
+        throw std::invalid_argument("Signaling message exceeds request limit");
     std::lock_guard lock(mutex_);
     if (commands_.size() >= 128) throw std::runtime_error("Signaling queue overflow");
     commands_.push_back({{"action", "signals"}, {"input", input}});
@@ -137,7 +139,9 @@ void Signaling::run(std::stop_token stop) {
     auto request=[&](const std::string& method,const std::string& path,const Json& data=Json::object()){return request_(method,base+path,data);};
     int64_t lastPoll=0,lastHeartbeat=nowUs(),ackRetryAt=0,leaseRefresh=nowUs();
     unsigned failures=0, commandFailures=0; bool suspended=false, eventOverflow=false, terminal=false;
-    int64_t commandRetryAt=0;
+    int64_t commandRetryAt=0, signalRetryAt=0;
+    unsigned exchangeFailures=0;
+    bool authorityReady=false;
     std::optional<Json> renewal;
     std::string currentSession=room_.value("sessionId","");
     const auto metadata = room_.value("protocol", Json::object());
@@ -195,6 +199,7 @@ void Signaling::run(std::stop_token stop) {
                 connections.emplace_back(hostId(), connection.value("generation", ""), connection.value("state", "") == "closed");
         }
         {std::lock_guard lock(mutex_); delivery_.authorizeConnections(connections);}
+        authorityReady=true;
         room["event"] = "room"; event(std::move(room));
     };
     auto renewSession=[&] {
@@ -204,7 +209,7 @@ void Signaling::run(std::stop_token stop) {
         room["event"]="rejoined";event(room);suspended=false;leaseRefresh=joinedAt;
         leaseDeadlineUs_=joinedAt+options_.leaseUs*5/6;lastPoll=0;lastHeartbeat=joinedAt;
         iceRefreshAt=0;
-        renewal.reset();failures=0;commandFailures=0;commandRetryAt=0;
+        renewal.reset();failures=0;commandFailures=0;commandRetryAt=0;signalRetryAt=0;exchangeFailures=0;authorityReady=false;
     };
     while(!stop.stop_requested() && !eventOverflow) {
         try {
@@ -270,20 +275,25 @@ void Signaling::run(std::stop_token stop) {
             if (exchangeEnabled && now >= ackRetryAt) {
                 const bool pulse = now-lastHeartbeat >= options_.heartbeatUs;
                 if (acks.size() > protocol::ackBatch) acks.erase(acks.begin()+protocol::ackBatch,acks.end());
-                Json input = {{"messages",Json::array()},{"acknowledgements",acks},{"heartbeat",pulse}};
+                Json input = {{"messages",Json::array()},{"acknowledgements",Json::array()},{"heartbeat",pulse}};
                 std::vector<Json> batch;
                 {
                     std::lock_guard lock(mutex_);
                     // Superseded generations cannot poison an otherwise valid batch.
-                    std::erase_if(commands_, [&](const Json& c){return c.at("action")=="signals" &&
+                    std::erase_if(commands_, [&](const Json& c){return authorityReady && c.at("action")=="signals" &&
                         !delivery_.current({{"from",c.at("input").at("to")},{"generation",c.at("input").at("generation")},{"type",c.at("input").at("type")}});});
-                    for (const auto& c : commands_) if (c.at("action")=="signals") {
+                    for (const auto& c : commands_) if (authorityReady && now>=signalRetryAt && c.at("action")=="signals") {
                         input["messages"].push_back(c.at("input"));
                         if (input.dump().size() > protocol::bodyBytes) { input["messages"].erase(input["messages"].end()-1); break; }
                         batch.push_back(c);
                         if (batch.size() == protocol::signalBatch) break;
                     }
                 }
+                for (const auto& ack:acks) {
+                    input["acknowledgements"].push_back(ack);
+                    if (input.dump().size()>protocol::bodyBytes) {input["acknowledgements"].erase(input["acknowledgements"].end()-1);break;}
+                }
+                acks=input.at("acknowledgements");
                 if (!batch.empty() || !acks.empty() || pulse) {
                     try {
                         const auto result = request("POST","/sync",input);
@@ -293,6 +303,7 @@ void Signaling::run(std::stop_token stop) {
                         snapshot(result.at("room"));
                         {std::lock_guard lock(mutex_); delivery_.ingest(result.at("messages"),nowUs()); delivery_.acknowledged(acks,nowUs());}
                         for (const auto& c:batch) removeCommand(c);
+                        if(!batch.empty()){exchangeFailures=0;signalRetryAt=0;}
                         if (pulse) {
                             lastHeartbeat=now;leaseRefresh=now;leaseDeadlineUs_=now+options_.leaseUs*5/6;
                             if(suspended){event({{"event","coordination-restored"}});suspended=false;}
@@ -305,8 +316,19 @@ void Signaling::run(std::stop_token stop) {
                             removeCommand(batch[size_t(e.messageIndex)]);
                             event({{"event","error"},{"code",e.code}});
                         }
-                        ackRetryAt=nowUs()+options_.pollUs;
-                    } catch (const std::exception&) { ackRetryAt=nowUs()+options_.pollUs; }
+                        if(!batch.empty()) {
+                            // Rollback also undoes ACKs. Retry those independently
+                            // while outbound messages back off, or two full inboxes
+                            // could prevent each other from ever draining.
+                            signalRetryAt=nowUs()+int64_t(std::min(10000u,250u*(1u<<std::min(++exchangeFailures,5u))))*1000;
+                            ackRetryAt=0;
+                        } else ackRetryAt=nowUs()+options_.pollUs;
+                    } catch (const std::exception&) {
+                        if(!batch.empty()) {
+                            signalRetryAt=nowUs()+int64_t(std::min(10000u,250u*(1u<<std::min(++exchangeFailures,5u))))*1000;
+                            ackRetryAt=0;
+                        } else ackRetryAt=nowUs()+options_.pollUs;
+                    }
                 }
             }
             const auto pollUs = now < fastPollUntilUs_.load() ? std::min<int64_t>(options_.pollUs, 250000) : options_.pollUs;
