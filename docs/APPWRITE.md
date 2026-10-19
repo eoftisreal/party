@@ -34,3 +34,20 @@ PARTY_FUNCTION_URL=https://party.sgp.appwrite.run node tools/smoke.js
 ```
 
 Local SDK contract fixtures verify transaction TTL, private permissions, rollback and bounded conflict retries. They are not live deployment tests. Verify the actual deployment, five viewers, real network changes and physical Windows output before release. Do not deploy over active parties without a coordinated maintenance window.
+
+## Diagnosing an unexpected room-start failure
+
+A public protocol/health response does not exercise room storage. If Start Party
+returns `INTERNAL_ERROR`, inspect the failed execution's `party_backend_error` log.
+Mapped SDK errors retain their database operation, numeric status and known type.
+Unmapped errors now identify the request stage (`request.body`, `request.ice`,
+`request.create`, `request.join` or `request.response`) and, when a backend frame
+is available, `location: {file,line,column}`. Use that location against the deployed
+source. This does not prove a schema, key-scope or transaction failure by itself.
+
+Diagnostics deliberately exclude error messages, raw stacks, absolute paths,
+request bodies, invitations and credentials. Do not enable raw exception logging
+to investigate a production request. An old generic `request.process` record
+without a location requires deploying this diagnostic update and retrying once.
+The patch improves diagnosis; it does not claim to fix an unidentified deployment
+failure or change database state, auth rules, retries or the wire protocol.

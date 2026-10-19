@@ -12,7 +12,7 @@ const types = new Set([
 ]);
 const collections = new Set(['rooms', 'members', 'peers', 'signals', 'notifications', 'limits']);
 function validOperation(operation) {
-  if (['transactions.create', 'transactions.commit', 'transactions.rollback', 'configuration.load', 'request.process'].includes(operation)) return true;
+  if (['transactions.create', 'transactions.commit', 'transactions.rollback', 'configuration.load', 'request.process', 'request.route', 'request.body', 'request.ice', 'request.create', 'request.join', 'request.response'].includes(operation)) return true;
   const [action, collection] = operation.split(':');
   return ['documents.get', 'documents.create', 'documents.update', 'documents.delete', 'documents.list'].includes(action) && collections.has(collection);
 }
@@ -24,13 +24,26 @@ export async function appwriteOperation(operation, work) {
     throw error; // Preserve SDK status and identity for conflict retries and auth handling.
   }
 }
+// Retain only a fixed module name and numeric position from backend frames.
+// Never copy a stack, message, URL, function name or absolute deployment path.
+function sourceLocation(error) {
+  if (typeof error?.stack !== 'string') return null;
+  for (const frame of error.stack.split('\n').slice(1)) {
+    if (!/^\s+at /.test(frame)) continue;
+    const match = /[/\\]src[/\\](http|rooms|signaling|store|ice|main|protocol)\.js:(\d{1,6}):(\d{1,6})\)?$/.exec(frame);
+    if (match) return { file: match[1] + '.js', line: Number(match[2]), column: Number(match[3]) };
+  }
+  return null;
+}
 export function safeDiagnostic(error, fallback = 'request.process') {
+  const location = operations.has(error) ? null : sourceLocation(error);
   return {
     event: 'party_backend_error',
     operation: operations.get(error) || (validOperation(fallback) ? fallback : 'unknown'),
     status: Number.isInteger(error?.code) && error.code >= 100 && error.code <= 599 ? error.code : null,
     errorType: types.has(error?.type) ? error.type : 'unknown',
     errorName: names.has(error?.name) ? error.name : 'Error',
+    ...(location ? { location } : {}),
   };
 }
 export function logDiagnostic(log, error, fallback) {
