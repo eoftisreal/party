@@ -59,7 +59,12 @@ export function makeSignalingService(store, rooms) {
   }
   async function peer(s, room, user, generation, target) {
     const p = await s.getPeer(peerId(room.$id, user === room.hostId ? target : user));
-    if (!p && user === room.hostId) fail(403, 'INVALID_TARGET', 'Signals must go between authorized host and viewer');
+    if (user === room.hostId && (!p || p.generation !== generation)) {
+      // Preserve v3's distinction between a real generation sent to the wrong
+      // viewer and an obsolete generation. The normal path stays a direct get.
+      const other = (await s.listPeers(room.$id)).find(p => p.generation === generation && p.state !== 'closed');
+      if (other && other.viewerId !== target) fail(403, 'INVALID_TARGET', 'Signals must go between authorized host and viewer');
+    }
     if (!p || p.generation !== generation || p.state === 'closed') fail(409, 'STALE_GENERATION', 'Connection was replaced or closed');
     if (!p) fail(409, 'STALE_GENERATION', 'Connection was replaced or closed');
     const host = await s.getMember(memberId(room.$id, p.hostId)), guest = await s.getMember(memberId(room.$id, p.viewerId));

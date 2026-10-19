@@ -110,6 +110,12 @@ test('closed generation queues do not starve a replacement viewer before TTL cle
   assert.equal((await f.signaling.inbox(f.r.roomId,'replacement',next.sessionId)).messages.length,1);
   await assert.rejects(f.exchange('viewer',{}),rejected('CREDENTIAL_REVOKED'));
 });
+test('direct peer lookup preserves legacy wrong-target and stale-generation error semantics',async()=>{
+  const f=await setup();await f.rooms.join(f.r.roomId,'second',f.r.inviteCode);
+  await f.signaling.connect(f.r.roomId,'host',f.r.sessionId,{viewerId:'second'});
+  await assert.rejects(f.exchange('host',{messages:[f.signal('candidate','second')]}),rejected('INVALID_TARGET'));
+  await assert.rejects(f.exchange('host',{messages:[{...f.signal('candidate','stranger'),generation:id()}]}),rejected('STALE_GENERATION'));
+});
 test('sharded public budgets keep an exact service-wide ceiling with fixed storage and refill',async()=>{
   const f=fixture(),maximum=19;
   const results=await Promise.allSettled(Array.from({length:30},(_,i)=>f.rooms.publicLimit('create','identity-'+i,maximum)));
