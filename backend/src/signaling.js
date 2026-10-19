@@ -98,8 +98,8 @@ export function makeSignalingService(store, rooms) {
     // A busy viewer cannot starve signaling for everyone else in the room.
     if (outstanding.filter(m => m.to === input.to).length >= 48 || outstanding.length >= 256)
       fail(429, 'INBOX_FULL', 'Peer inbox is full');
-    await s.updateMember(memberId(id, user), { rateWindow: window, rateCount: count + 1 });
     member.rateWindow = window; member.rateCount = count + 1;
+    authority.rateChanged = true;
     const expiresAt = new Date(Math.min(rooms.now() + 120000, Date.parse(room.expiresAt))).toISOString();
     const created = await s.createSignal(sid, { roomId: id, from: user, to: input.to, generation: p.generation, type: input.type, payload,
       toSession: user === p.hostId ? p.viewerSession : p.hostSession, expiresAt });
@@ -115,6 +115,10 @@ export function makeSignalingService(store, rooms) {
       if (m && (m.roomId !== id || m.to !== user || m.toSession !== session)) fail(403, 'INVALID_ACK', 'Not your message');
       if (m) await s.deleteSignal(mid);
     }
+  }
+  async function saveRate(s, id, user, authority) {
+    if (authority.rateChanged) await s.updateMember(memberId(id, user), {
+      rateWindow: authority.member.rateWindow, rateCount: authority.member.rateCount });
   }
   return {
     messages,
@@ -144,7 +148,12 @@ export function makeSignalingService(store, rooms) {
     },
     async send(id, user, session, input) {
       validateSignal(input);
-      return store.atomic(async s => sendIn(s, id, user, session, input, await rooms.authorize(s, id, user, session)));
+      return store.atomic(async s => {
+        const authority = await rooms.authorize(s, id, user, session);
+        const result = await sendIn(s, id, user, session, input, authority);
+        await saveRate(s, id, user, authority);
+        return result;
+      });
     },
     async exchange(id, user, session, input) {
       if (!object(input) || Object.keys(input).some(k => !['messages', 'acknowledgements', 'heartbeat'].includes(k)))
@@ -168,6 +177,7 @@ export function makeSignalingService(store, rooms) {
           try { await sendIn(s, id, user, session, batch[i], authority); }
           catch (e) { e.messageIndex = i; throw e; }
         }
+        await saveRate(s, id, user, authority);
         if (input.heartbeat) await rooms.heartbeatIn(s, id, user, authority.room);
       });
       // A lost response or racing snapshot is retried with the same IDs. Receipts

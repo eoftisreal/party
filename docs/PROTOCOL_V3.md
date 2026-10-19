@@ -22,7 +22,7 @@ The native worker prioritizes peer authorization over background coordination, u
 
 ## Contention and bounded work
 
-Room mutation fences remain necessary for revocation/closure races. Batching shares one fence; transaction-local reads are cached and invalidated on writes. Root authorization reads are never cached. Host signaling looks up the target peer directly; a batch reads the queue once and accounts for its newly staged messages. `/sync` recipient/session/expiry queries use an inbox index instead of fetching other viewers' messages.
+Room mutation fences remain necessary for revocation/closure races. Batching shares one fence; transaction-local reads are cached and invalidated on writes. Root authorization reads are never cached. Host signaling looks up the target peer directly; a batch reads the queue once, accounts for its newly staged messages and persists its combined member rate count once. Closed generations do not consume live inbox capacity while awaiting cleanup. `/sync` recipient/session/expiry queries use an inbox index instead of fetching other viewers' messages.
 
 Public start/join budgets use eight fixed shards with quotas summing to the original exact service cap. A request normally writes one shard; when full, it can spill into another. Fresh identities do not increase the total allowance or allocate unbounded counters. Saturation can still exhaust availability and cause more shard attempts; platform request/concurrency limits remain required. Per-room admission and per-member message limits are unchanged.
 

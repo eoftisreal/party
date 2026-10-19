@@ -38,10 +38,17 @@ test('v3 contract is advertised in bootstrap; legacy alias preserves expiry type
 });
 test('exchange batches offer, ICE, ACK, answer and heartbeat under one fence per transaction',async()=>{
   const f=await setup();assert.equal(f.p.room.connections[0].generation,f.p.generation);
-  let transactions=0;const atomic=f.store.atomic;f.store.atomic=work=>{++transactions;return atomic(work);};
+  let transactions=0,queueReads=0,rateWrites=0;const atomic=f.store.atomic;
+  f.store.atomic=work=>{++transactions;return atomic(async s=>{
+    const list=s.listSignals,update=s.updateMember;
+    s.listSignals=async(...args)=>{++queueReads;return list(...args);};
+    s.updateMember=async(mid,fields)=>{if(fields.rateCount!==undefined)++rateWrites;return update(mid,fields);};
+    return work(s);
+  });};
   const offer=f.signal('offer'),candidate=f.signal(),revision=f.rs.get(f.r.roomId).revision;
   const sent=await f.exchange('host',{messages:[offer,candidate],heartbeat:true});
   assert.deepEqual(sent.accepted,[offer.messageId,candidate.messageId]);assert.equal(transactions,1);
+  assert.equal(queueReads,1);assert.equal(rateWrites,1,'Batch must persist its combined rate count once');
   assert.equal(f.rs.get(f.r.roomId).revision,revision+1);
   const inbox=await f.signaling.inbox(f.r.roomId,'viewer',f.v.sessionId);
   const answer=f.signal('answer','host');
