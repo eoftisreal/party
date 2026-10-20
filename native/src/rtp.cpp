@@ -107,7 +107,17 @@ void RtpReceiver::setCutoff(int64_t cutoff) {
 void RtpReceiver::discardFrame() { frame_.clear(); fragment_ = false; damaged_ = false; }
 void RtpReceiver::deliver(const RtpPacket& p) {
     const auto anchor = anchorUs_.load();
-    if (!anchor) return; // Wait for authenticated clock state; never guess a wrapping epoch.
+    if (!anchor) {
+        // Clock state may arrive in the middle of a multi-packet access unit.
+        // Remember whether we discarded its beginning, including SPS/PPS, so
+        // the remaining IDR slices cannot reach a fresh decoder on their own.
+        if (video_) { discardFrame(); waitingVideoBoundary_ = !p.marker; }
+        return; // Never guess a wrapping epoch before authenticated clock state.
+    }
+    if (video_ && waitingVideoBoundary_) {
+        if (p.marker) { waitingVideoBoundary_ = false; keyframe_(); }
+        return;
+    }
     if (!video_) {
         emit_({false, unwrapTimestamp(p.timestamp, 48000, anchor), {p.payload.begin(), p.payload.end()}}); ++stats->frames; return;
     }

@@ -40,6 +40,30 @@ int main() {
         rtc::message_vector pre{packet(10,90000,true,{0x65,1})};cold.incoming(pre,[](auto){});cold.pump(nowUs());
         cold.setAnchor(anchor);rtc::message_vector post{packet(11,93000,true,{0x65,1})};cold.incoming(post,[](auto){});
         expect(cold.stats->jitterUs==0,"Missing clock anchor inflated jitter");
+        // Clock state can arrive between the SPS/PPS and the final IDR slice.
+        // Never publish the tail of that access unit to a fresh decoder.
+        std::vector<EncodedFrame> anchoredFrames; unsigned anchorRequests=0;
+        RtpReceiver lateClock(true,[&](auto frame){anchoredFrames.push_back(std::move(frame));},[&]{++anchorRequests;});
+        auto clockInput=[&](rtc::message_ptr message){rtc::message_vector messages{message};lateClock.incoming(messages,[](auto){});lateClock.pump(nowUs());};
+        clockInput(packet(100,90000,false,{0x67,1}));
+        clockInput(packet(101,90000,false,{0x68,2}));
+        lateClock.setAnchor(anchor);
+        clockInput(packet(102,90000,true,{0x65,3}));
+        expect(anchoredFrames.empty(),"Clock activation emitted an incomplete IDR access unit");
+        clockInput(packet(103,93000,true,{0x65,4}));
+        expect(anchoredFrames.size()==1 && anchorRequests>0,"Clock activation did not recover at the next access unit");
+        expect(anchoredFrames.back().data==std::vector<uint8_t>({0,0,0,1,0x65,4}),"Clock activation corrupted the next access unit");
+        clockInput(packet(104,96000,false,{0x67,5}));
+        lateClock.setAnchor(0);
+        clockInput(packet(105,96000,false,{0x68,6}));
+        lateClock.setAnchor(anchor);
+        clockInput(packet(106,96000,true,{0x65,7}));
+        expect(anchoredFrames.size()==1,"Clock loss mixed access units across clock states");
+        lateClock.setAnchor(0);
+        clockInput(packet(107,99000,true,{0x65,8}));
+        lateClock.setAnchor(anchor);
+        clockInput(packet(108,102000,true,{0x65,9}));
+        expect(anchoredFrames.size()==2,"A clockless marker unnecessarily discarded the next complete access unit");
         const auto count=frames.size();receiver.setCutoff(anchor+100000);
         input(packet(6,96000,true,{0x65,1}));receiver.pump(nowUs()+300000);
         expect(frames.size()==count,"Previous playback epoch leaked after seek");
