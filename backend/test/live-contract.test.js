@@ -6,8 +6,9 @@ import { appwriteOperation, safeDiagnostic, logDiagnostic } from '../src/diagnos
 
 // SDK requests are real; authentication/storage are offline contract fixtures.
 // The transaction TTL validation matches Appwrite's tagged 2.4.0 source.
-async function execution({ failAt, code = 400, type = 'document_invalid_structure', rollbackFails = false, createLimitPerHour = 0 } = {}) {
+async function execution({ failAt, code = 400, type = 'document_invalid_structure', rollbackFails = false, createLimitPerHour = 0, withoutStructuredClone = false } = {}) {
   const original = Client.prototype.call;
+  const originalClone = globalThis.structuredClone;
   const oldEnv = {...process.env};
   const calls = [], logs = [], persisted = new Map(), transactions = new Map();
   const secret = 'NEVER_LOG_JWT_API_KEY_INVITE_PASSWORD_SESSION';
@@ -29,7 +30,7 @@ async function execution({ failAt, code = 400, type = 'document_invalid_structur
       if (failAt === 'transactions.create') throw failure();
       if (payload.ttl < 60 || payload.ttl > 3600) throw new AppwriteException('Invalid ttl',400,'general_argument_invalid');
       const id = `tx${++serial}`;
-      transactions.set(id, structuredClone(persisted));
+      transactions.set(id, originalClone(persisted));
       return {$id:id};
     }
     if (path.startsWith('/v1/databases/transactions/')) {
@@ -53,18 +54,20 @@ async function execution({ failAt, code = 400, type = 'document_invalid_structur
     const key = collection+':'+(id || payload.documentId);
     if (method === 'get') {
       if (!documents.has(key)) throw new AppwriteException('missing',404,'document_not_found');
-      return structuredClone(documents.get(key));
+      return originalClone(documents.get(key));
     }
     if (method === 'post') assert.deepEqual(payload.permissions,[], 'Persisted documents must remain private');
     const document = {$id:id || payload.documentId, ...documents.get(key), ...payload.data};
-    documents.set(key,document);return structuredClone(document);
+    documents.set(key,document);return originalClone(document);
   };
   try {
+    if (withoutStructuredClone) delete globalThis.structuredClone;
     await main({req:{method:'POST',path:'/v1/rooms',headers:{'x-appwrite-key':secret},bodyJson:{title:'Movie night'}},
       res:{json:(body,status)=>{response={body,status};return response;}},error:line=>logs.push(line)});
     return {response,calls,logs,persisted,transactions,secret};
   } finally {
     Client.prototype.call = original;
+    globalThis.structuredClone = originalClone;
     for (const key of Object.keys(process.env)) if (!(key in oldEnv)) delete process.env[key];
     Object.assign(process.env,oldEnv);
   }
@@ -129,4 +132,17 @@ test('guest creation uses real SDK storage without any Appwrite Account request'
   assert.equal(response.status,201);assert.match(response.body.hostId,/^g_[a-f0-9]{32}$/);
   assert.equal(calls.some(c=>c.path==='/v1/account'),false);
   assert.equal(persisted.get('rooms:'+response.body.roomId).hostId,response.body.hostId);
+});
+
+
+test('room creation commits private room and membership without the runtime structuredClone global', async () => {
+  const {response,persisted,transactions,logs} = await execution({withoutStructuredClone:true});
+  assert.equal(response.status,201,JSON.stringify(logs));
+  assert.ok(persisted.has('rooms:'+response.body.roomId));
+  const members=[...persisted].filter(([key])=>key.startsWith('members:')).map(([,value])=>value);
+  assert.equal(members.length,1);
+  assert.equal(members[0].roomId,response.body.roomId);
+  assert.equal(members[0].sessionId,response.body.sessionId);
+  assert.equal(transactions.size,0);
+  assert.deepEqual(logs,[]);
 });

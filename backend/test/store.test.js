@@ -115,3 +115,30 @@ test('non-conflict database failures are not retried',async()=>{
     assert.equal(starts,1);assert.equal(rollbacks,1);
   } finally {Client.prototype.call=original;}
 });
+
+
+test('JSON document copies isolate nested root and cached reads when structuredClone throws', async () => {
+  const original=Client.prototype.call, originalClone=globalThis.structuredClone;
+  const document={$id:'member',title:'?? caf?',nested:{items:[{enabled:true}],nothing:null},$permissions:[]};
+  let reads=0;
+  Client.prototype.call=async function(method,url){
+    if(url.pathname.includes('/databases/transactions'))return {$id:'tx'};
+    assert.equal(method,'get'); ++reads;
+    if(url.pathname.endsWith('/missing'))throw Object.assign(Error('missing'),{code:404});
+    return document;
+  };
+  globalThis.structuredClone=()=>{throw Error('Runtime clone unavailable');};
+  try {
+    const store=makeAppwriteStore({APPWRITE_ENDPOINT:'https://example.test/v1',APPWRITE_PROJECT_ID:'test',PARTY_DATABASE_ID:'party'},'key');
+    const root=await store.getMember('member');root.nested.items[0].enabled=false;root.$permissions.push('changed');
+    assert.equal(document.nested.items[0].enabled,true);assert.deepEqual(document.$permissions,[]);
+    assert.deepEqual(await store.getMember('member'),document);assert.equal(reads,2);
+    await store.atomic(async s=>{
+      const first=await s.getMember('member');first.nested.items.push({enabled:false});
+      const second=await s.getMember('member');assert.deepEqual(second,document);
+      assert.notEqual(second.nested,document.nested);assert.equal(reads,3);
+      assert.equal(await s.getMember('missing'),null);
+      assert.equal(await s.getMember('missing'),null);assert.equal(reads,4);
+    });
+  } finally {Client.prototype.call=original;globalThis.structuredClone=originalClone;}
+});

@@ -6,6 +6,10 @@ import { limits } from './protocol.js';
 // Appwrite 2.4.0 validates transaction TTL in [60, 3600] seconds.
 const TRANSACTION_TTL_SECONDS = 60;
 
+// Appwrite documents come from JSON responses. Keep returned reads isolated
+// without depending on structuredClone being exposed by the Function runtime.
+const cloneDocument = value => value == null ? value : JSON.parse(JSON.stringify(value));
+
 export function makeAppwriteStore(env, runtimeKey, { wait = sleep, random = Math.random } = {}) {
   const endpoint = env.APPWRITE_FUNCTION_API_ENDPOINT || env.APPWRITE_ENDPOINT;
   const project = env.APPWRITE_FUNCTION_PROJECT_ID || env.APPWRITE_PROJECT_ID;
@@ -23,10 +27,10 @@ export function makeAppwriteStore(env, runtimeKey, { wait = sleep, random = Math
     const args = name => ({ databaseId, collectionId: collections[name], ...(transactionId ? { transactionId } : {}) });
     const get = async (name, id) => {
       const key = `${name}:${id}`;
-      if (transactionId && cache.has(key)) return structuredClone(cache.get(key));
+      if (transactionId && cache.has(key)) return cloneDocument(cache.get(key));
       const value = await maybe(appwriteOperation(`documents.get:${name}`, () => db.getDocument({ ...args(name), documentId: id })));
       if (transactionId) cache.set(key, value);
-      return structuredClone(value);
+      return cloneDocument(value);
     };
     const create = (name, id, data, permissions = []) => {
       cache.delete(`${name}:${id}`);
